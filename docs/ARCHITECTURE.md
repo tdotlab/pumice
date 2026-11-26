@@ -2,10 +2,20 @@
 
 ## Scope
 
-This document covers the desktop shell only: window creation, startup,
-application menu, renderer layout, preload bridge, tests and the seams the vault
-module will use. Vault storage, Markdown parsing, editing, saving and search are
-out of scope and remain unimplemented.
+This document covers the desktop shell and the first editing workflow: window,
+startup, menu, renderer layout, preload bridge, the vault IPC surface, and the
+open → browse → edit → save path. Markdown parsing, preview, highlighting,
+search, creation/deletion of notes and recovery are out of scope and remain
+unimplemented.
+
+Implemented in the first vertical slice:
+
+- open a vault folder (copied test vaults only in this milestone)
+- list its Markdown notes and open one in a plain-text editor
+- save atomically through the vault core, with external-change detection
+- refuse to clobber a note another program changed, and let the user reload or
+  explicitly overwrite
+- notice an external change when the window regains focus
 
 ## Stack decision
 
@@ -44,14 +54,17 @@ main/renderer web boundary Mike's concept describes.
 │   ├─ menu.js        native menu; shell actions forwarded to renderer        │
 │   ├─ lifecycle.js   window-all-closed / activate / second-instance          │
 │   ├─ ipc.js         shell:get-app-info, shell:renderer-ready                │
-│   └─ smoke.js       --smoke-test probe, validation, optional screenshot     │
+│   ├─ vault-session.js  one open vault over src/vault.js (list/read/write)   │
+│   ├─ vault-ipc.js      vault:* channels, plain-data result envelopes        │
+│   └─ smoke.js       --smoke-test probe, vault flow, optional screenshot     │
 └───────────────────────────────────┬─────────────────────────────────────────┘
                                     │ contextBridge (preload, CJS)
 ┌───────────────────────────────────┴─────────────────────────────────────────┐
 │ sandboxed renderer (local file, strict CSP)                                  │
 │ index.html → styles.css                                                     │
-│ ui.mjs        view model: vault title, file list, status, Open vault        │
-│ renderer.mjs  boot, error capture, preload wiring, window.pumiceShell       │
+│ ui.mjs          shell view: vault title, file list, status, Open vault      │
+│ vault-ui.mjs    controller: open/list/read/edit/save/conflict handling      │
+│ renderer.mjs    boot, error capture, preload wiring, window.pumiceShell     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -100,8 +113,10 @@ constraint), and the smoke test validated the layout at that floor.
 
 ## Integration interface
 
-The shell deliberately exposes only a few stable seams. The vault module should
-extend these rather than reaching around them.
+The shell and the vault session meet at three narrow seams: the frozen preload
+bridge, the `vault:` IPC channels, and the shell view. Everything else — path
+validation, atomic writes, conflict detection — lives in `src/vault.js` behind
+the main process boundary.
 
 ### Preload API — `window.pumice`
 
@@ -121,32 +136,58 @@ interface PumiceApi {
   onMenuAction(
     callback: (action: 'open-vault' | 'about') => void
   ): () => void;                           // returns unsubscribe
+
+  openVault(): Promise<VaultResult>;
+  listNotes(): Promise<VaultResult>;
+  readNote(path: string): Promise<VaultResult>;
+  statNote(path: string): Promise<VaultResult>;
+  writeNote(
+    path: string,
+    content: string,
+    expectedVersion?: string | null
+  ): Promise<VaultResult>;
 }
 ```
 
-The bridge validates menu action names and never exposes `ipcRenderer`,
-`invoke`, `send` or Node primitives.
+The bridge validates argument types (non-empty string path, string content,
+string-or-null version) and never exposes `ipcRenderer`, `invoke`, `send` or
+Node primitives.
 
-### IPC channels owned by the shell
+### IPC channels
+
+The shell owns `shell:`; the vault session owns `vault:`. Neither overloads the
+other.
 
 | Direction | Channel | Kind | Payload |
 | --- | --- | --- | --- |
 | renderer → main | `shell:get-app-info` | `invoke`/`handle` | none → app info object |
 | renderer → main | `shell:renderer-ready` | `send`/`on` | none |
 | main → renderer | `shell:menu-action` | `send`/`on` | `'open-vault' \| 'about'` |
+| renderer → main | `vault:open` | `invoke`/`handle` | none → `{ ok, vault }` or `{ ok: false, canceled }` |
+| renderer → main | `vault:list` | `invoke`/`handle` | none → `{ ok, files }` |
+| renderer → main | `vault:read` | `invoke`/`handle` | note path → `{ ok, note }` |
+| renderer → main | `vault:stat` | `invoke`/`handle` | note path → `{ ok, note \| null }` |
+| renderer → main | `vault:write` | `invoke`/`handle` | `{ path, content, expectedVersion }` → `{ ok, note }` |
 
-`about` is handled natively in the main process with a message box and is not
-forwarded. The vault module must add its own `vault:` channels in a separate
-module; it should not overload the `shell:` namespace.
+Every vault handler resolves with a plain-data envelope:
+`{ ok: true, ... }` or `{ ok: false, canceled?: true, error: { code, name,
+message, path, reason } }`. Errors are converted in `vault-ipc.js` because
+Electron only preserves an error message across IPC; the editor needs
+`code: 'CONFLICT'` and `reason: 'modified' | 'deleted'` to react correctly. No
+stack traces are sent to the renderer.
+
+`vault:open` shows a native folder picker. The smoke run substitutes a copied
+fixture vault for the picker, which is how the full open/edit/save path is
+exercised without a human.
 
 ### Renderer seams
 
 - `document` receives `pumice:open-vault-requested` (bubbling `CustomEvent`)
-  when the user clicks **Open vault** or uses `File → Open vault…`. This is a
-  request only; no folder dialog exists yet.
+  when the user clicks **Open vault** or uses `File → Open vault…`.
+  `renderer.mjs` forwards it to `controller.openVault()`.
 - After boot, `document` receives `pumice:shell-ready` with
   `{ detail: { view } }`.
-- `window.pumiceShell` is the live view:
+- `window.pumiceShell` is the shell view:
 
 ```ts
 interface ShellView {
@@ -158,34 +199,80 @@ interface ShellView {
 }
 ```
 
+- `window.pumiceVault` is the editing controller (exposed for the smoke probe;
+  it is not a general-purpose API):
+
+```ts
+interface VaultController {
+  openVault(): Promise<VaultResult>;
+  openNote(path: string): Promise<VaultResult>;
+  save(options?: { force?: boolean }): Promise<VaultResult>;
+  overwrite(): Promise<VaultResult>;
+  reload(options?: { quiet?: boolean }): Promise<VaultResult>;
+  checkForExternalChange(): Promise<void>;
+  getState(): { vault; note; version; dirty; saving; externalChange; bannerVisible };
+  destroy(): void;
+}
+```
+
 `setVault(null)` restores "No vault open". File rows are rendered with
 `textContent` (never `innerHTML`), so vault-controlled names cannot inject
-markup. `path` is currently only a stable row identifier; the shell never opens
-it.
+markup. `path` is the stable row identifier and the only note identifier the
+renderer ever sends; the main process resolves it inside the open vault root
+and the vault core rejects traversal, absolute paths, NUL bytes and symlinks.
 
-### Wiring the vault module
+### First editing workflow
 
-1. Add `src/vault/` with its own main-process module and `vault:` IPC handlers.
-   Validate that requested paths stay inside the opened vault root.
-2. Extend `src/preload/preload.js` with the minimal vault calls (for example
-   `selectVault()`, `listFiles()`, `readNote()`, `writeNote()`), keeping the
-   object frozen, the file self-contained, and the tests updated for the bridge
-   surface.
-3. In the renderer, listen for `pumice:open-vault-requested`, call
-   `selectVault()`, then `window.pumiceShell.setVault({ name, files })`.
-4. Listen for file-row activation (the vault module can delegate a click handler
-   on `li.file-item` or add its own `data-*` attribute), read the file, and
-   replace the editor empty state with the note view.
-5. Report IO failures through `setStatus(message, 'error' | 'warning')`; never
-   write outside the selected vault and never touch Mike's checkout.
+`src/renderer/vault-ui.mjs` is the state machine:
 
-Tests for the vault module must use copied fixture vaults. This shell performs
-no file IO at all, which is why its tests need no fixtures.
+1. **Open** — `vault:open` returns the vault name plus sorted Markdown entries.
+   The shell view renders them; the editor returns to its empty state.
+2. **Read** — activating a row (click, Enter or Space) calls `vault:read`. The
+   note body fills the textarea, and the returned `version` (sha256 of the
+   bytes) becomes the expected version for the next save.
+3. **Edit** — typing compares the textarea against the loaded text; the dirty
+   badge and Save button follow. Switching notes or reopening a vault with
+   unsaved edits asks for confirmation first.
+4. **Save** — `vault:write` with the read version (button or Ctrl/Cmd+S). The
+   vault core writes a temp file, fsyncs and atomically renames it, so a crash
+   or failure leaves the previous note intact. Success updates the version
+   token and status; text typed while a save was in flight stays dirty.
+5. **Conflict** — if the note changed (or disappeared) on disk, the core returns
+   `CONFLICT` and leaves the disk copy untouched. The controller keeps the draft
+   in the editor, explains what happened, and offers **Reload from disk** or an
+   explicit **Overwrite with my version** (a deliberate unchecked save).
+6. **External change while open** — on window focus the controller calls
+   `vault:stat`. A clean note is reloaded quietly with a warning; a dirty note
+   keeps its text and shows the conflict banner. No automatic write ever
+   happens.
+
+The editor is a plain monospace `<textarea>`: no contenteditable, no renderer
+framework, consistent with the shell's no-build stack. Markdown is stored as
+text; preview and highlighting are future work.
+
+### Wiring summary
+
+1. `src/vault.js` (core, tested separately) provides `Vault.open`,
+   `listMarkdown`, `readMarkdown`, `writeMarkdown`.
+2. `src/main/vault-session.js` holds the one open vault and adds display
+   metadata (note name, path).
+3. `src/main/vault-ipc.js` registers the five `vault:` handlers and converts
+   errors to envelopes.
+4. `src/preload/preload.js` exposes type-checked vault calls on `window.pumice`.
+5. `src/renderer/vault-ui.mjs` drives the UI from those results; the shell view
+   in `ui.mjs` owns only chrome. IO failures surface through `setStatus(...,
+   'error' | 'warning')` and the banner; no path outside the selected vault is
+   ever written, and Mike's checkout is never touched.
+
+The renderer performs no file IO. Session and IPC tests build real temporary
+vaults; the app-level smoke run uses a copy of `test/fixtures/smoke-vault` in
+the OS temp directory and removes it on exit. No test or smoke run opens a real
+user vault.
 
 ## Tests
 
-Run with `npm test`. Node's test runner discovers `test/*.test.mjs`; jsdom loads
-the real `src/renderer/index.html`.
+Run with `npm test`. Node's test runner discovers both `test/*.test.mjs` and
+`test/*.test.js`; jsdom loads the real `src/renderer/index.html`.
 
 | File | Covers |
 | --- | --- |
@@ -194,29 +281,31 @@ the real `src/renderer/index.html`.
 | `menu.test.mjs` | Open vault accelerator, close/quit roles, dev-only devtools, About |
 | `lifecycle.test.mjs` | platform quit behaviour, activate focus/recreate, single instance |
 | `ipc.test.mjs` | exact shell channels, app-info payload, renderer-ready, action validation |
-| `preload-api.test.mjs` | executes the real preload source in a VM: only requires electron, one frozen bridge, invoke/send channels, unsubscribe, filtering |
-| `renderer-shell.test.mjs` | CSP, single module script, landmarks, empty states, status defaults |
+| `preload-api.test.mjs` | real preload source in a VM: one frozen bridge, shell and vault channels, argument validation, unsubscribe, filtering |
+| `renderer-shell.test.mjs` | CSP, single module script, landmarks, empty states, editor markup defaults |
 | `renderer-ui.test.mjs` | open request, vault/file rendering, empty vault, reset, status states, XSS, destroy |
-| `smoke.test.mjs` | smoke snapshot validation, including layout geometry |
+| `renderer-vault.test.mjs` | open/cancel/error, read, edit/dirty, save, conflict, overwrite, reload, external change, deleted note, note switching, destroy |
+| `vault-session.test.mjs` | one open vault, listing, read/write, conflict/deleted, stat, NO_VAULT, traversal, non-Markdown |
+| `vault-ipc.test.mjs` | exact vault channels, envelopes, cancelled dialog, conflict, explicit overwrite, validation, error serialisation |
+| `smoke.test.mjs` | snapshot/vault-flow validation, generated-script syntax and escaping, fixture copy/cleanup, disk verification |
+| `open/list-read/write/security.test.js` | vault core safety, atomicity and conflict tests (41 tests) |
 
-Test-first evidence:
+Test-first evidence for this slice:
 
-- Before implementation, `npm test` reported `tests 14 / pass 0 / fail 14`;
-  every suite failed on missing `src/main/*` modules or `src/renderer/index.html`.
-- After implementation, the suite reached `48 pass`; one test imported the
-  renderer module with a default import instead of its named export, which was
-  corrected in the test itself.
-- The first real Electron smoke run showed no renderer errors but did not yet
-  prove the preload bridge. A bridge/version probe was added and failed with
-  `hasPreloadBridge:false`: sandboxed preloads cannot `require` local modules,
-  so the original `preload.js` → `api.js` split never executed. The preload was
-  made self-contained, its real source is now executed in a VM by the tests, and
-  the smoke run passes with `hasPreloadBridge:true` and `version:"v0.1.0"`.
-- Final suite: **50 tests, 50 pass, 0 fail**.
+- The new tests were written before the implementation. The red run reported
+  `tests 100 / pass 91 / fail 9`: missing `src/main/vault-session.js`,
+  `src/main/vault-ipc.js`, `src/main/smoke-vault.js`,
+  `src/renderer/vault-ui.mjs`, missing editor markup, and the old preload and
+  smoke contracts.
+- After implementation: **141 tests, 141 pass, 0 fail** (`npm test`, exit 0).
+  The red and green summaries are appended to `docs/red-green-log.txt`.
 
 The Electron smoke run is separate from `npm test` because it launches a real
-browser process. `npm run smoke:headless` prints one JSON line. Verified result
-in this environment:
+browser process. It now drives the whole workflow through the UI — click **Open
+vault**, click the first note, type, click **Save** — and the main process then
+reads the copied vault from disk to confirm the saved text is really there.
+`npm run smoke:headless` prints one JSON line. Verified result in this
+environment:
 
 ```json
 {"ok":true,"snapshot":{"title":"Pumice","hasShell":true,"hasSidebar":true,
@@ -225,12 +314,17 @@ in this environment:
 "layout":{"sidebar":{"x":0,"y":56,"width":240,"height":394},
 "editor":{"x":240,"y":56,"width":520,"height":394},
 "statusbar":{"x":0,"y":450,"width":760,"height":30}},
-"rendererErrors":[]},"errors":[]}
+"rendererErrors":[],
+"vaultFlow":{"attempted":true,"opened":true,"noteOpened":true,"edited":true,
+"saved":true,"path":"notes/daily.md","marker":"Smoke edit 1795722682241",
+"status":"Saved notes/daily.md","error":null,"diskContainsEdit":true}},
+"errors":[]}
 ```
 
-A 760×480 screenshot from that run was visually inspected: brand/top bar,
-240px sidebar with vault title and button, editor empty state, bottom status
-bar; no overlaps, clipping or unstyled content.
+The run exits 0 and leaves no temporary vault behind. Layout geometry is
+checked at the 760×480 Ozone floor. Pixel-level appearance of the new editor
+was not inspected by a human because this host has no visible display; the DOM
+and geometry were verified instead.
 
 ## Environment notes and limits
 
@@ -241,10 +335,24 @@ bar; no overlaps, clipping or unstyled content.
   the app was run with Chromium's Ozone headless platform:
   `--ozone-platform=headless --disable-gpu --no-sandbox`.
 - The app-level smoke test is real Electron: BrowserWindow, preload bridge,
-  renderer module execution, layout geometry, error capture, screenshot. The
-  only thing not exercised is presenting pixels to an X11/Wayland compositor.
+  renderer modules, folder selection substitution, file listing, note read,
+  text edit, save through IPC and vault core, and disk verification. The only
+  thing not exercised is presenting pixels to an X11/Wayland compositor.
 - macOS/Windows lifecycle branches are covered by unit tests with injected
   platform values, not by running on those systems.
-- There is no packaging, signing, auto-update, persistence, vault IO, editor or
-  search yet. No production vault was opened or modified.
+- The editor is a plain textarea: no Markdown preview, syntax highlighting,
+  wrapping toggle, or WYSIWYG. Markdown is stored verbatim as UTF-8 text.
+- There is no search, note creation/deletion, rename, recovery UI, or file
+  watcher. External changes are detected on save (conflict) and when the window
+  regains focus (version comparison); a change made while the app is focused
+  and idle is not noticed until the next focus/save.
+- The inherited vault-core limits still apply: conflict checking is
+  compare-then-atomic-rename without an OS file lock, so a third-party write
+  landing between the version check and the rename can be overwritten and is
+  not detected afterwards (best-effort, not serializable conflict handling);
+  `writeMarkdown` requires the parent directory to exist; symlinks are refused
+  outright.
+- There is no packaging, signing, auto-update, or persistence beyond the files
+  themselves. No production or irreplaceable vault was opened or modified, and
+  Mike's checkout was never touched.
 - No GitHub push, release or deployment was performed.

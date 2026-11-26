@@ -45,22 +45,55 @@
 
         <main class="editor" data-testid="editor" aria-label="Editor">
           <div class="editor-toolbar">
-            <span class="document-title" data-testid="document-title">Nothing open</span>
-            <span class="document-hint">Markdown</span>
+            <div class="document-heading">
+              <span class="document-title" data-testid="document-title">Nothing open</span>
+              <span class="document-hint">Markdown</span>
+            </div>
+            <div class="editor-actions">
+              <span class="note-dirty" data-testid="note-dirty" hidden>Unsaved</span>
+              <button class="button button-quiet" type="button" data-testid="reload-note-button" disabled>
+                Reload
+              </button>
+              <button class="button button-primary" type="button" data-testid="save-note-button" disabled>
+                Save
+              </button>
+            </div>
           </div>
 
           <section class="editor-body" aria-label="Note content">
+            <div class="editor-banner" data-testid="editor-banner" role="status" hidden>
+              <p class="editor-banner-text" data-testid="editor-banner-text"></p>
+              <div class="editor-banner-actions">
+                <button class="button button-quiet" type="button" data-testid="banner-reload-button">
+                  Reload from disk
+                </button>
+                <button class="button button-warning" type="button" data-testid="banner-overwrite-button" hidden>
+                  Overwrite with my version
+                </button>
+              </div>
+            </div>
+
             <div class="empty-state" data-testid="editor-empty">
               <span class="empty-kicker">Pumice</span>
               <h2>Your notes, still yours.</h2>
               <p>
-                Open a vault to browse its Markdown files. Editing and saving arrive
-                with the vault module.
+                Open a vault, pick a Markdown note and edit it here. Saves are atomic:
+                a failure leaves the previous version on disk.
               </p>
               <p class="empty-detail">
-                Pumice works on a folder of plain text files — no database, no lock-in.
+                If another program changes the note, Pumice refuses to overwrite it
+                and asks you what to do.
               </p>
             </div>
+
+            <textarea
+              class="note-editor"
+              data-testid="note-editor"
+              aria-label="Note content"
+              spellcheck="true"
+              wrap="soft"
+              hidden
+            ></textarea>
           </section>
         </main>
       </div>

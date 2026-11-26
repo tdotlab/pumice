@@ -76,6 +76,8 @@ export function createShellView({ document, onOpenVault = () => {} } = {}) {
       const item = document.createElement('li');
       item.className = 'file-item';
       item.dataset.path = asNonEmptyString(file?.path) ?? '';
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
 
       const name = document.createElement('span');
       name.className = 'file-name';

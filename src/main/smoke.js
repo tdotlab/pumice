@@ -1,6 +1,8 @@
 'use strict';
 
 const fs = require('node:fs');
+const path = require('node:path');
+const { isInside } = require('./smoke-vault.js');
 
 const REQUIRED_REGIONS = Object.freeze([
   ['hasShell', 'app shell'],
@@ -27,15 +29,25 @@ function buildSmokeScript() {
         height: Math.round(box.height),
       };
     };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (read, timeoutMs) => {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        const value = read();
+        if (value) return value;
+        await sleep(25);
+      }
+      return null;
+    };
 
     const bridge = window.pumice;
     const versionElement = document.querySelector('[data-testid="app-version"]');
     const started = Date.now();
     while (versionElement && versionElement.textContent === '' && Date.now() - started < 2000) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await sleep(25);
     }
 
-    return {
+    const snapshot = {
       title: document.title,
       hasShell: probe('app-shell'),
       hasSidebar: probe('sidebar'),
@@ -51,10 +63,75 @@ function buildSmokeScript() {
       },
       rendererErrors: Array.isArray(window.__pumiceErrors) ? window.__pumiceErrors.slice() : ['rendererErrors not initialised'],
     };
+
+    // Drive the real first workflow through the UI: open the (copied) vault,
+    // open the first note, edit it and save. Main verifies the disk afterwards.
+    const vaultFlow = {
+      attempted: true,
+      opened: false,
+      noteOpened: false,
+      edited: false,
+      saved: false,
+      path: null,
+      marker: null,
+      status: null,
+      error: null,
+    };
+
+    try {
+      const controller = await waitFor(() => window.pumiceVault || null, 5000);
+      if (!controller) throw new Error('vault controller did not start');
+      const openButton = document.querySelector('[data-testid="open-vault-button"]');
+      if (!openButton) throw new Error('Open vault button is missing');
+      openButton.click();
+
+      const firstItem = await waitFor(
+        () => document.querySelector('[data-testid="file-items"] li.file-item'),
+        8000,
+      );
+      if (!firstItem) throw new Error('vault file list never populated');
+      vaultFlow.opened = true;
+      vaultFlow.path = firstItem.dataset.path;
+      firstItem.click();
+
+      const textarea = await waitFor(() => {
+        const element = document.querySelector('[data-testid="note-editor"]');
+        return element && !element.hidden ? element : null;
+      }, 5000);
+      if (!textarea) throw new Error('note editor never opened');
+      vaultFlow.noteOpened = true;
+
+      const marker = 'Smoke edit ' + Date.now();
+      textarea.value = textarea.value.replace(/\\s*$/, '') + '\\n\\n' + marker + '\\n';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      vaultFlow.edited = true;
+      vaultFlow.marker = marker;
+
+      const saveButton = document.querySelector('[data-testid="save-note-button"]');
+      if (!saveButton || saveButton.disabled) {
+        throw new Error('save button was not enabled after editing');
+      }
+      saveButton.click();
+
+      const savedStatus = await waitFor(() => {
+        const status = document.querySelector('[data-testid="status-text"]');
+        return status && /^Saved /.test(status.textContent.trim())
+          ? status.textContent.trim()
+          : null;
+      }, 8000);
+      if (!savedStatus) throw new Error('save was never confirmed in the status bar');
+      vaultFlow.saved = true;
+      vaultFlow.status = savedStatus;
+    } catch (error) {
+      vaultFlow.error = String(error && error.message ? error.message : error);
+    }
+
+    snapshot.vaultFlow = vaultFlow;
+    return snapshot;
   })()`;
 }
 
-function validateSmokeSnapshot(snapshot) {
+function validateSmokeSnapshot(snapshot, { expectVaultFlow = false } = {}) {
   if (!snapshot || typeof snapshot !== 'object') {
     return { ok: false, errors: ['renderer returned no snapshot'] };
   }
@@ -98,14 +175,58 @@ function validateSmokeSnapshot(snapshot) {
     errors.push(`renderer error: ${snapshot.rendererErrors.join('; ')}`);
   }
 
+  if (expectVaultFlow) {
+    const flow = snapshot.vaultFlow;
+    if (!flow || typeof flow !== 'object') {
+      errors.push('vault flow was not attempted');
+    } else {
+      const reason = flow.error ? `: ${flow.error}` : '';
+      if (flow.opened !== true) errors.push(`vault did not open${reason}`);
+      if (flow.noteOpened !== true) errors.push(`no note opened in the editor${reason}`);
+      if (flow.edited !== true) errors.push(`no edit reached the note editor${reason}`);
+      if (flow.saved !== true) errors.push(`save was not confirmed${reason}`);
+      if (flow.diskContainsEdit !== true) errors.push('saved text was not found on disk');
+    }
+  }
+
   return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Confirm from the main process that the renderer's save actually reached the
+ * scratch vault on disk. Refuses paths that escape the vault root.
+ */
+function verifySavedNote({ vaultRoot, vaultFlow }) {
+  if (!vaultRoot || !vaultFlow) return false;
+  const relPath = vaultFlow.path;
+  const marker = vaultFlow.marker;
+  if (typeof relPath !== 'string' || relPath === '') return false;
+  if (typeof marker !== 'string' || marker === '') return false;
+
+  const absolute = path.resolve(vaultRoot, relPath);
+  if (!isInside(vaultRoot, absolute)) return false;
+
+  try {
+    return fs.readFileSync(absolute, 'utf8').includes(marker);
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Drive one real renderer load and exit the app with a meaningful status.
  * Used by `npm run smoke`; it cannot run without a usable display/compositor.
+ * When `vaultRoot` is provided the run also exercises open -> edit -> save
+ * against that copied vault and verifies the text on disk.
  */
-function runSmokeTest({ app, window, timeoutMs = 20000, log = console.log }) {
+function runSmokeTest({
+  app,
+  window,
+  vaultRoot = null,
+  timeoutMs = 20000,
+  log = console.log,
+  beforeExit = null,
+}) {
   return new Promise((resolve) => {
     let settled = false;
 
@@ -114,6 +235,13 @@ function runSmokeTest({ app, window, timeoutMs = 20000, log = console.log }) {
       settled = true;
       clearTimeout(timer);
       log(`PUMICE_SMOKE_RESULT ${JSON.stringify({ ok, ...details })}`);
+      if (typeof beforeExit === 'function') {
+        try {
+          beforeExit();
+        } catch (error) {
+          log(`PUMICE_SMOKE_CLEANUP_ERROR ${String(error)}`);
+        }
+      }
       app.exit(ok ? 0 : 1);
       resolve(ok);
     };
@@ -129,7 +257,14 @@ function runSmokeTest({ app, window, timeoutMs = 20000, log = console.log }) {
     webContents.once('did-finish-load', async () => {
       try {
         const snapshot = await webContents.executeJavaScript(buildSmokeScript());
-        const result = validateSmokeSnapshot(snapshot);
+        if (snapshot && typeof snapshot === 'object' && vaultRoot) {
+          const flow = snapshot.vaultFlow && typeof snapshot.vaultFlow === 'object'
+            ? snapshot.vaultFlow
+            : {};
+          flow.diskContainsEdit = verifySavedNote({ vaultRoot, vaultFlow: flow });
+          snapshot.vaultFlow = flow;
+        }
+        const result = validateSmokeSnapshot(snapshot, { expectVaultFlow: Boolean(vaultRoot) });
         const details = { snapshot, errors: result.errors };
 
         const screenshotPath = process.env.PUMICE_SMOKE_SCREENSHOT;
@@ -154,4 +289,10 @@ function runSmokeTest({ app, window, timeoutMs = 20000, log = console.log }) {
   });
 }
 
-module.exports = { REQUIRED_REGIONS, buildSmokeScript, runSmokeTest, validateSmokeSnapshot };
+module.exports = {
+  REQUIRED_REGIONS,
+  buildSmokeScript,
+  runSmokeTest,
+  validateSmokeSnapshot,
+  verifySavedNote,
+};

@@ -80,3 +80,31 @@ test('status and vault title start with honest placeholder text', async () => {
   assert.equal(document.querySelector('[data-testid="status-text"]').textContent.trim(), 'Ready');
   assert.equal(document.querySelector('[data-testid="status-text"]').dataset.state, 'ready');
 });
+
+test('the editor pane starts empty with a disabled save action and a hidden notice banner', async () => {
+  const { window } = await loadShellDom();
+  const { document } = window;
+
+  const textarea = document.querySelector('[data-testid="note-editor"]');
+  assert.ok(textarea);
+  assert.equal(textarea.tagName, 'TEXTAREA');
+  assert.equal(textarea.hidden, true);
+  assert.equal(textarea.getAttribute('aria-label'), 'Note content');
+  assert.equal(textarea.getAttribute('spellcheck'), 'true');
+
+  const save = document.querySelector('[data-testid="save-note-button"]');
+  const reload = document.querySelector('[data-testid="reload-note-button"]');
+  assert.equal(save.tagName, 'BUTTON');
+  assert.equal(save.disabled, true);
+  assert.match(save.textContent, /save/i);
+  assert.equal(reload.disabled, true);
+
+  const dirty = document.querySelector('[data-testid="note-dirty"]');
+  assert.equal(dirty.hidden, true);
+
+  const banner = document.querySelector('[data-testid="editor-banner"]');
+  assert.ok(banner);
+  assert.equal(banner.hidden, true);
+  assert.equal(document.querySelector('[data-testid="banner-overwrite-button"]').hidden, true);
+  assert.ok(document.querySelector('[data-testid="editor-banner-text"]'));
+});

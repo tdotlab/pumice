@@ -168,8 +168,39 @@ button {
   line-height: 1;
 }
 
+[data-testid="save-note-button"]::before,
+[data-testid="reload-note-button"]::before,
+[data-testid="banner-reload-button"]::before,
+[data-testid="banner-overwrite-button"]::before {
+  content: none;
+}
+
 .button-primary:hover {
   background: var(--accent-strong);
+}
+
+.button-quiet {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink-soft);
+}
+
+.button-quiet:hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.button-warning {
+  background: var(--warning);
+  color: var(--stone-0);
+}
+
+.button-warning:hover {
+  background: #6d4700;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .button:focus-visible {
@@ -198,11 +229,23 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: default;
+  cursor: pointer;
 }
 
 .file-item:hover {
   background: rgba(255, 255, 255, 0.55);
+}
+
+.file-item.is-active,
+.file-item[aria-current="true"] {
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.file-item:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .file-item[data-path=""] {
@@ -256,6 +299,34 @@ button {
   white-space: nowrap;
 }
 
+.document-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.editor-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor-actions .button {
+  width: auto;
+  min-height: 28px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+}
+
+.note-dirty {
+  color: var(--warning);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .document-hint,
 .status-meta {
   color: var(--muted);
@@ -267,15 +338,69 @@ button {
 .editor-body {
   display: flex;
   flex: 1;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
-  padding: 40px 32px;
+  overflow: hidden;
+}
+
+.editor-banner {
+  flex: none;
+  margin: 12px 24px 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(138, 90, 0, 0.35);
+  border-radius: 9px;
+  background: rgba(255, 244, 219, 0.9);
+}
+
+.editor-banner-text {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.editor-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.editor-banner-actions .button {
+  width: auto;
+  min-height: 30px;
+  padding: 5px 12px;
+  font-size: 12.5px;
 }
 
 .empty-state {
   width: min(100%, 460px);
+  margin: auto;
+  padding: 40px 32px;
+}
+
+.note-editor {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 28px 32px 48px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.7;
+  resize: none;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.note-editor::selection {
+  background: rgba(138, 111, 77, 0.25);
 }
 
 .empty-kicker {

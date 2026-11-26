@@ -1,4 +1,5 @@
 import { createShellView } from './ui.mjs';
+import { createVaultController } from './vault-ui.mjs';
 
 // Collected for the Electron smoke run. Keep this list small and text-only.
 window.__pumiceErrors = [];
@@ -23,6 +24,27 @@ const view = createShellView({
 });
 
 window.pumiceShell = view;
+
+// The vault controller owns open/edit/save. It is created only when the
+// preload bridge is present; without it the shell still renders honestly.
+let vaultController = null;
+if (api) {
+  vaultController = createVaultController({
+    document,
+    view,
+    api,
+    confirm: (message) => window.confirm(message),
+  });
+  window.pumiceVault = vaultController;
+
+  document.addEventListener('pumice:open-vault-requested', () => {
+    vaultController.openVault();
+  });
+
+  window.addEventListener('focus', () => {
+    vaultController.checkForExternalChange();
+  });
+}
 
 document.dispatchEvent(new CustomEvent('pumice:shell-ready', { detail: { view } }));
 

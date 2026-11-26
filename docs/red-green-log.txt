@@ -213,3 +213,49 @@ $ npm test   # final run after review hardening (temp-name + O_NOFOLLOW/lstat tw
 ℹ todo 0
 ℹ duration_ms 2549.485117
 exit=0
+
+2026-11-26T14:52:35-05:00
+$ npm test   # RED: integration + editor workflow tests written before implementation
+
+New suites: vault-session.test.mjs, vault-ipc.test.mjs, renderer-vault.test.mjs,
+extended preload-api/renderer-shell/smoke tests. Sources absent at this point:
+src/main/vault-session.js, src/main/vault-ipc.js, src/main/smoke-vault.js,
+src/renderer/vault-ui.mjs, plus editor markup and new preload/smoke contracts.
+
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '.../src/renderer/vault-ui.mjs'
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '.../src/main/vault-ipc.js'
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '.../src/main/vault-session.js'
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '.../src/main/smoke-vault.js'
+✖ the preload source only requires electron and exposes one frozen bridge
+✖ the editor pane starts empty with a disabled save action and a hidden notice banner
+✖ the smoke script is self-contained and reports the required probes
+ℹ tests 100
+ℹ pass 91
+ℹ fail 9
+exit=1
+
+$ npm test   # GREEN: integrated shell + vault core + session/IPC + editor + smoke flow
+ℹ tests 141
+ℹ suites 0
+ℹ pass 141
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9480.187476
+exit=0
+
+$ PUMICE_LOCAL_PREFIX=<extracted GTK prefix> npm run smoke:headless
+PUMICE_SMOKE_RESULT {"ok":true,"snapshot":{"title":"Pumice","hasShell":true,
+"hasSidebar":true,"hasEditor":true,"hasStatusbar":true,"hasOpenVaultButton":true,
+"hasPreloadBridge":true,"version":"v0.1.0","layout":{"sidebar":{"x":0,"y":56,
+"width":240,"height":394},"editor":{"x":240,"y":56,"width":520,"height":394},
+"statusbar":{"x":0,"y":450,"width":760,"height":30}},"rendererErrors":[],
+"vaultFlow":{"attempted":true,"opened":true,"noteOpened":true,"edited":true,
+"saved":true,"path":"notes/daily.md","marker":"Smoke edit 1795722682241",
+"status":"Saved notes/daily.md","error":null,"diskContainsEdit":true}},
+"errors":[]}
+exit=0
+# Real Electron: copied fixture vault -> Open vault -> open notes/daily.md ->
+# edit -> Save -> main process read the marker back from disk.
+# Temp vault removed on exit (no pumice-smoke-* left behind).

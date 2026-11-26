@@ -136,9 +136,10 @@ either the complete old note or the complete new one.
 
 The conflict check is a compare-then-replace against the bytes observed at the
 start of `writeMarkdown`. There is no OS file lock, so a third-party program
-that writes in the small window between the check and the atomic rename is not
-detected (it would be on the next save). Within the app's own serialized saves
-this is not an issue. Idle detection/refresh should re-read on window focus.
+that writes in the small window between the check and the atomic rename can be
+overwritten by this save and is not detected afterwards. Within the app's own
+serialized saves this is not an issue. Idle detection/refresh should re-read on
+window focus.
 
 ## `vault.isMarkdown(relativePath) → boolean`
 
@@ -182,6 +183,24 @@ the `SECURITY` subtype.
 - **Hidden files** are hidden from listing by default (`includeHidden: true`
   opts in), but the API never treats a name starting with `.` as special
   otherwise.
+
+## Desktop integration
+
+The app consumes this API only in the main process, through
+`src/main/vault-session.js`:
+
+- `VaultSession` holds the one open vault (`open`, `close`, `list`, `read`,
+  `write`, `stat`) and adds `path`/`name` display metadata.
+- `src/main/vault-ipc.js` exposes it on the `vault:` IPC channels and converts
+  errors to `{ ok: false, error: { code, reason, message, path } }` envelopes,
+  because Electron does not preserve custom error properties across IPC.
+- The renderer's `writeNote` passes the `version` from the last read as
+  `expectedVersion`; only an explicit, user-confirmed **Overwrite** sends
+  `null`.
+
+`stat(relPath)` is an app-level convenience: it reads and hashes the current
+file (returning `null` when it no longer exists) so the editor can compare
+versions on window focus without holding file handles open.
 
 ## Out of scope (this milestone)
 

@@ -7,6 +7,20 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const MENU_ACTIONS = Object.freeze(['open-vault', 'about']);
 
+function requireNotePath(notePath) {
+  if (typeof notePath !== 'string' || notePath.trim() === '') {
+    throw new TypeError('note path must be a non-empty string');
+  }
+  return notePath;
+}
+
+function requireExpectedVersion(expectedVersion) {
+  if (expectedVersion !== null && typeof expectedVersion !== 'string') {
+    throw new TypeError('expectedVersion must be a string or null');
+  }
+  return expectedVersion;
+}
+
 function createPreloadApi(bridge) {
   return Object.freeze({
     getAppInfo() {
@@ -26,6 +40,35 @@ function createPreloadApi(bridge) {
       };
       bridge.on('shell:menu-action', listener);
       return () => bridge.removeListener('shell:menu-action', listener);
+    },
+
+    // Vault file access. The main process decides which folder is open; the
+    // renderer can only name paths inside it (the vault core rejects escapes).
+    openVault() {
+      return bridge.invoke('vault:open');
+    },
+
+    listNotes() {
+      return bridge.invoke('vault:list');
+    },
+
+    readNote(notePath) {
+      return bridge.invoke('vault:read', requireNotePath(notePath));
+    },
+
+    statNote(notePath) {
+      return bridge.invoke('vault:stat', requireNotePath(notePath));
+    },
+
+    writeNote(notePath, content, expectedVersion = null) {
+      requireNotePath(notePath);
+      if (typeof content !== 'string') throw new TypeError('note content must be a string');
+      requireExpectedVersion(expectedVersion);
+      return bridge.invoke('vault:write', {
+        path: notePath,
+        content,
+        expectedVersion,
+      });
     },
   });
 }

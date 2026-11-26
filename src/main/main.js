@@ -7,11 +7,16 @@ const { acquireSingleInstanceLock, installLifecycle } = require('./lifecycle.js'
 const { registerIpcHandlers } = require('./ipc.js');
 const { buildMenuTemplate } = require('./menu.js');
 const { runSmokeTest } = require('./smoke.js');
+const { copyFixtureVault } = require('./smoke-vault.js');
+const { registerVaultIpcHandlers } = require('./vault-ipc.js');
+const { VaultSession } = require('./vault-session.js');
 const { loadShellWindow } = require('./window.js');
 
 const args = parseArgs(process.argv);
 const isDev = !app.isPackaged;
+const vaultSession = new VaultSession();
 let mainWindow = null;
+let smokeVault = null;
 
 app.setName('Pumice');
 
@@ -47,7 +52,9 @@ function handleMenuAction(action) {
       type: 'info',
       title: 'About Pumice',
       message: `Pumice ${app.getVersion()}`,
-      detail: 'A lightweight desktop shell for plain-Markdown vaults.\n\nVault storage is provided by the vault module.',
+      detail:
+        'A lightweight desktop notes app for plain-Markdown vaults.\n\n' +
+        'Vault files are read and written atomically by the main process.',
     });
     return;
   }
@@ -55,6 +62,42 @@ function handleMenuAction(action) {
   const window = getMainWindow();
   if (window) window.webContents.send('shell:menu-action', action);
 }
+
+/**
+ * Folder picker for the renderer's Open vault action. The smoke run substitutes
+ * a copied fixture vault so the whole workflow can run without a human.
+ */
+async function chooseVaultDirectory() {
+  if (args.smokeTest) {
+    if (!smokeVault) throw new Error('smoke vault has not been prepared yet');
+    return smokeVault.root;
+  }
+
+  const options = {
+    title: 'Open Markdown vault',
+    buttonLabel: 'Open vault',
+    properties: ['openDirectory'],
+  };
+  const window = getMainWindow();
+  const result = window
+    ? await dialog.showOpenDialog(window, options)
+    : await dialog.showOpenDialog(options);
+
+  if (result.canceled) return null;
+  if (!Array.isArray(result.filePaths) || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+}
+
+function cleanupSmokeVault() {
+  if (!smokeVault) return;
+  try {
+    smokeVault.cleanup();
+  } finally {
+    smokeVault = null;
+  }
+}
+
+app.on('will-quit', cleanupSmokeVault);
 
 if (args.smokeTest) {
   // The smoke run never needs compositing; this also keeps it friendlier to
@@ -81,21 +124,40 @@ if (!acquireSingleInstanceLock(app)) {
     onRendererReady: () => {},
   });
 
+  registerVaultIpcHandlers({
+    ipcMain,
+    session: vaultSession,
+    chooseDirectory: chooseVaultDirectory,
+  });
+
   app
     .whenReady()
-    .then(() => {
+    .then(async () => {
       Menu.setApplicationMenu(
         Menu.buildFromTemplate(
           buildMenuTemplate({ appName: 'Pumice', isDev, onAction: handleMenuAction }),
         ),
       );
 
+      if (args.smokeTest) {
+        smokeVault = await copyFixtureVault();
+        await vaultSession.open(smokeVault.root);
+      }
+
       const window = createMainWindow();
       if (args.devTools) window.webContents.openDevTools({ mode: 'detach' });
-      if (args.smokeTest) runSmokeTest({ app, window });
+      if (args.smokeTest) {
+        runSmokeTest({
+          app,
+          window,
+          vaultRoot: smokeVault.root,
+          beforeExit: cleanupSmokeVault,
+        });
+      }
     })
     .catch((error) => {
       console.error('Pumice failed to start:', error);
+      cleanupSmokeVault();
       app.exit(1);
     });
 }

@@ -66,7 +66,16 @@ test('the preload source only requires electron and exposes one frozen bridge', 
   const [key, api] = exposed[0];
   assert.equal(key, 'pumice');
   assert.equal(Object.isFrozen(api), true);
-  assert.deepEqual(Object.keys(api).sort(), ['getAppInfo', 'notifyReady', 'onMenuAction']);
+  assert.deepEqual(Object.keys(api).sort(), [
+    'getAppInfo',
+    'listNotes',
+    'notifyReady',
+    'onMenuAction',
+    'openVault',
+    'readNote',
+    'statNote',
+    'writeNote',
+  ]);
   assert.equal('invoke' in api, false);
   assert.equal('send' in api, false);
   assert.deepEqual(Object.keys(exports).sort(), ['MENU_ACTIONS', 'createPreloadApi']);
@@ -116,4 +125,38 @@ test('onMenuAction rejects non-function subscribers early', () => {
     () => exposed[0][1].onMenuAction(null),
     (error) => error.name === 'TypeError' && /callback function/i.test(error.message),
   );
+});
+
+test('vault calls use their own channels and send only plain values', async () => {
+  const { exposed, ipcRenderer } = loadPreload();
+  const api = exposed[0][1];
+
+  await api.openVault();
+  await api.listNotes();
+  await api.readNote('notes/daily.md');
+  await api.statNote('notes/daily.md');
+  await api.writeNote('notes/daily.md', '# hi\n', 'v1');
+  await api.writeNote('notes/daily.md', '# hi\n', null);
+
+  assert.equal(JSON.stringify(ipcRenderer.invocations), JSON.stringify([
+    ['vault:open'],
+    ['vault:list'],
+    ['vault:read', 'notes/daily.md'],
+    ['vault:stat', 'notes/daily.md'],
+    ['vault:write', { path: 'notes/daily.md', content: '# hi\n', expectedVersion: 'v1' }],
+    ['vault:write', { path: 'notes/daily.md', content: '# hi\n', expectedVersion: null }],
+  ]));
+});
+
+test('vault calls reject malformed arguments instead of forwarding them', () => {
+  const { exposed, ipcRenderer } = loadPreload();
+  const api = exposed[0][1];
+  const isTypeError = (error) => error.name === 'TypeError';
+
+  assert.throws(() => api.readNote(''), isTypeError);
+  assert.throws(() => api.readNote(42), isTypeError);
+  assert.throws(() => api.statNote(null), isTypeError);
+  assert.throws(() => api.writeNote('a.md', undefined), isTypeError);
+  assert.throws(() => api.writeNote('a.md', 'x', 7), isTypeError);
+  assert.deepEqual(ipcRenderer.invocations, []);
 });
