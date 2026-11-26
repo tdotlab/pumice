@@ -286,7 +286,7 @@ Run with `npm test`. Node's test runner discovers both `test/*.test.mjs` and
 | `preload-api.test.mjs` | real preload source in a VM: one frozen bridge, shell and vault channels, argument validation, unsubscribe, filtering |
 | `renderer-shell.test.mjs` | CSP, single module script, landmarks, empty states, editor markup defaults |
 | `renderer-ui.test.mjs` | open request, vault/file rendering, empty vault, reset, status states, XSS, destroy |
-| `renderer-vault.test.mjs` | open/cancel/error, read, edit/dirty, save, conflict, overwrite, reload, external change, deleted note, note switching, non-UTF-8 refusal, dirty-close beforeunload, destroy |
+| `renderer-vault.test.mjs` | open/cancel/error, read, edit/dirty, save, conflict, overwrite, reload, external change, deleted note, note switching, non-UTF-8 refusal, dirty-close beforeunload, CRLF/lone-CR/mixed line endings on save, focus-time `INVALID_ENCODING`, destroy |
 | `close-guard.test.mjs` | dirty-close dialog: discard allows the unload; keep-editing, a failing dialog and dispose keep it |
 | `vault-session.test.mjs` | one open vault, listing, read/write, conflict/deleted, stat, NO_VAULT, traversal, non-Markdown, utf8 listing flag |
 | `vault-ipc.test.mjs` | exact vault channels, envelopes, cancelled dialog, conflict, explicit overwrite, validation, error serialisation |
@@ -317,8 +317,12 @@ existed, so the titlebar X or Quit discarded a dirty draft.
   instead of decoding. The listing reports `utf8` per note, the renderer tags
   such a note "not UTF-8", refuses to open it, and the status bar reports
   "not UTF-8" instead of assuming UTF-8. `writeMarkdown` also refuses to
-  replace a non-UTF-8 file, so no path can rewrite one. UTF-8 with a BOM and
-  CRLF still round-trip byte-identically.
+  replace a non-UTF-8 file, so no Pumice path rewrites one; like every other
+  check here it runs before the atomic rename, so a third-party non-UTF-8 write
+  landing in that window can still be replaced and is not detected afterwards.
+  UTF-8 with a BOM and CRLF still round-trip byte-identically through the vault
+  API, and the editor re-applies a note's own line endings on save (see the
+  editor integrity follow-up below).
 - **Dirty close.** The renderer cancels `beforeunload` while the editor is
   dirty; `src/main/close-guard.js` answers Electron's `will-prevent-unload`
   with a *Keep editing / Discard changes and close* dialog and only calls
@@ -335,12 +339,56 @@ Test-first evidence for the follow-up:
 - Green: **165 tests, 165 pass, 0 fail** (`npm test`, exit 0).
 - `npm run smoke:headless`: exit 0, `"ok":true`, `diskContainsEdit:true`,
   `rendererErrors:[]`.
-- `npm run e2e:data-safety` (real Electron, headless Ozone, 24 checks): exit 0,
+- `npm run e2e:data-safety` (real Electron, headless Ozone, 31 checks): exit 0,
   `"ok":true` — latin-1 and UTF-16LE notes are listed and tagged, refused by
   `vault:read`/`vault:write` with `INVALID_ENCODING` while their bytes stay
   unchanged; a UTF-8 note opens and saves; the close dialog keeps the window
   and the draft on "Keep editing" (for both window close and Quit) and closes
   the window on "Discard changes and close".
+
+### Editor integrity follow-up: line endings, focus-time encoding, doc accuracy
+
+QA of this milestone found three non-blocking integrity/doc issues in the
+editor path (F5 medium, F9 low, F3b low). This follow-up fixes them test-first.
+
+- **F5 — the editor no longer rewrites line endings.** A `<textarea>`'s value
+  sanitiser turns CRLF and lone CR into LF on assignment, so saving
+  `textarea.value` rewrote every note that contained CR. The renderer now
+  records the endings a note used when it is read (`normalizeEol`,
+  `analyzeEol` and `restoreEol` in `src/renderer/vault-ui.mjs`), treats
+  normalisation alone as "not dirty", and re-applies the note's own endings on
+  save: a CRLF note stays CRLF, a lone-CR note stays CR, and a mixed note keeps
+  each existing line's ending while lines typed afterwards use the note's most
+  common ending (ties prefer CRLF, then LF). A note whose text was not changed
+  is written back byte-identically because the original string is sent instead
+  of the textarea's LF copy.
+- **F9 — a note that turns non-UTF-8 is announced on focus.**
+  `checkForExternalChange()` used to return silently on every failed
+  `statNote`. `INVALID_ENCODING` is now treated as an external change: the
+  encoding banner appears, the draft stays in the editor and stays dirty, and
+  no reload/overwrite is offered (the read path refuses those bytes too).
+- **F3b — the encoding write guard is documented as best-effort.** "No path
+  can rewrite one" was too strong: like the conflict check, the guard compares
+  bytes and then renames, so a third-party non-UTF-8 write landing in that
+  window can be replaced and is not detected afterwards. README,
+  `docs/API.md` and the encoding paragraph above now say so.
+
+Evidence for the follow-up:
+
+- Red first: the new renderer tests were run against the old controller —
+  `tests 29 / pass 24 / fail 5` in `test/renderer-vault.test.mjs` (CRLF save,
+  untouched CRLF save, lone-CR edit, mixed-ending edit, focus-time
+  `INVALID_ENCODING`).
+- Green: `npm test` — **171 tests, 171 pass, 0 fail**, exit 0.
+- `npm run smoke:headless` — exit 0, `"ok":true`, `diskContainsEdit:true`,
+  `rendererErrors:[]`.
+- `npm run e2e:data-safety` (real Electron, headless Ozone) — exit 0,
+  `"ok":true`, **31/31 checks**. It adds a `notes/crlf.md` fixture that is
+  opened, edited and saved through the real UI; the bytes on disk afterwards are
+  `232063726c660d0a6c696e650d0a580d0a` (`# crlf\r\nline\r\nX\r\n`). It also
+  replaces the open note with latin-1 bytes and dispatches `focus`: the banner
+  reports "not UTF-8", the draft is intact and still dirty, and neither Reload
+  nor Overwrite is shown.
 
 The Electron smoke run is separate from `npm test` because it launches a real
 browser process. It now drives the whole workflow through the UI — click **Open

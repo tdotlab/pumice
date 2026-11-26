@@ -5,6 +5,8 @@
  *  - ask the main process to open a vault, then render its Markdown files
  *  - load a note into the textarea and mark it dirty while the text differs
  *  - save through the vault API with the version the note was read at
+ *  - put the note's own line endings back on save: the textarea can only hold
+ *    LF, so CRLF / lone-CR / mixed notes would otherwise be rewritten as LF
  *  - never clobber a note another program changed: a save conflict keeps the
  *    draft in the editor and offers an explicit reload or overwrite
  *  - notice external edits when the window regains focus
@@ -17,6 +19,57 @@ const EMPTY_TITLE = 'Nothing open';
 const DIRTY_LABEL = 'Unsaved changes';
 const STATUS_META_UTF8 = 'Markdown · UTF-8';
 const STATUS_META_NOT_UTF8 = 'Markdown · not UTF-8';
+
+/**
+ * Line endings a note may use. A textarea can only hold LF: the HTML value
+ * sanitiser turns CRLF and lone CR into LF on assignment, so the editor text
+ * alone cannot say how the note ended its lines.
+ */
+function normalizeEol(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * Note the endings a note actually used, so a save can put them back. A file
+ * with one kind of break keeps that kind; a mixed file remembers each break
+ * in order plus its most common ending for lines typed afterwards.
+ */
+function analyzeEol(text) {
+  const breaks = text.match(/\r\n|\r|\n/g) ?? [];
+  const kinds = new Set(
+    breaks.map((breakText) => (breakText === '\r\n' ? 'crlf' : breakText === '\r' ? 'cr' : 'lf')),
+  );
+  const counts = new Map();
+  for (const breakText of breaks) counts.set(breakText, (counts.get(breakText) ?? 0) + 1);
+  // Lines typed after the note was read get its most common ending; on a tie
+  // the more conventional ending wins (CRLF, then LF, then CR).
+  let commonCount = 0;
+  for (const count of counts.values()) if (count > commonCount) commonCount = count;
+  const common =
+    ['\r\n', '\n', '\r'].find((breakText) => counts.get(breakText) === commonCount) ?? '\n';
+  return {
+    style: kinds.size === 0 ? 'none' : kinds.size === 1 ? [...kinds][0] : 'mixed',
+    breaks,
+    common,
+  };
+}
+
+/**
+ * Reapply a note's own line endings to LF text from the editor: a uniform
+ * style converts every break, a mixed note keeps each original line's ending
+ * and gives later lines the note's most common ending.
+ */
+function restoreEol(text, eol) {
+  if (!eol || eol.style === 'none' || eol.style === 'lf') return text;
+  if (eol.style === 'crlf') return text.replace(/\n/g, '\r\n');
+  if (eol.style === 'cr') return text.replace(/\n/g, '\r');
+  const parts = text.split('\n');
+  let restored = parts[0];
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    restored += (eol.breaks[index] ?? eol.common) + parts[index + 1];
+  }
+  return restored;
+}
 
 /**
  * A note whose bytes are not valid UTF-8 is never loaded into the editor:
@@ -140,16 +193,19 @@ export function createVaultController({ document, api, view, confirm = () => tru
   }
 
   function applyNote(note) {
+    const content = typeof note.content === 'string' ? note.content : '';
     state.note = {
       path: note.path,
       name: note.name ?? note.path,
-      content: typeof note.content === 'string' ? note.content : '',
+      content,
+      normalized: normalizeEol(content),
+      eol: analyzeEol(content),
       version: note.version,
       size: note.size,
       mtimeMs: note.mtimeMs,
     };
     state.externalChange = false;
-    elements.textarea.value = state.note.content;
+    elements.textarea.value = state.note.normalized;
     elements.textarea.hidden = false;
     elements.editorEmpty.hidden = true;
     elements.documentTitle.textContent = note.path;
@@ -258,7 +314,13 @@ export function createVaultController({ document, api, view, confirm = () => tru
     if (destroyed || !state.note || state.saving) return { ok: false, ignored: true };
 
     const { path: notePath, version } = state.note;
-    const content = elements.textarea.value;
+    const editorText = normalizeEol(elements.textarea.value);
+    // The textarea can only change line endings; put the note's own endings
+    // back, and never rewrite a note whose text the user did not change.
+    const content =
+      editorText === state.note.normalized
+        ? state.note.content
+        : restoreEol(editorText, state.note.eol);
     const expectedVersion = force ? null : version;
 
     state.saving = true;
@@ -274,11 +336,13 @@ export function createVaultController({ document, api, view, confirm = () => tru
         ...saved,
         path: saved.path ?? notePath,
         content,
+        normalized: normalizeEol(content),
+        eol: analyzeEol(content),
       };
       state.externalChange = false;
       hideBanner();
       // Text typed while the save was in flight must stay dirty.
-      const stillDirty = elements.textarea.value !== content;
+      const stillDirty = normalizeEol(elements.textarea.value) !== state.note.normalized;
       setDirty(stillDirty, { updateStatus: false });
       setStatus(
         stillDirty ? `Saved ${notePath} — newer edits not yet saved` : `Saved ${notePath}`,
@@ -366,7 +430,21 @@ export function createVaultController({ document, api, view, confirm = () => tru
     if (destroyed || !state.note || state.saving) return;
     const notePath = state.note.path;
     const result = await callApi(api.statNote, notePath);
-    if (!result?.ok) return;
+    if (!result?.ok) {
+      // stat() reads the bytes to hash them, so a note that stopped being
+      // UTF-8 raises INVALID_ENCODING instead of reporting a version. That is
+      // an external change too: say so, and keep the draft.
+      if (result?.error?.code === 'INVALID_ENCODING' && !state.externalChange) {
+        state.externalChange = true;
+        showBanner(
+          `“${notePath}” is not UTF-8 on disk any more (it changed outside Pumice). ` +
+            'Pumice will not rewrite its bytes, so the save is refused. Your edits are still in the editor.',
+          {},
+        );
+        setStatus('Note changed on disk — now not UTF-8', 'warning');
+      }
+      return;
+    }
 
     if (result.note === null) {
       if (!state.externalChange) {
@@ -418,7 +496,7 @@ export function createVaultController({ document, api, view, confirm = () => tru
 
   function handleInput() {
     if (destroyed || !state.note || state.saving) return;
-    setDirty(elements.textarea.value !== state.note.content);
+    setDirty(normalizeEol(elements.textarea.value) !== state.note.normalized);
   }
 
   function handleFileClick(event) {

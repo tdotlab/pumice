@@ -291,3 +291,35 @@ PUMICE_E2E_RESULT {"ok":true,...}   # 24 checks, exit 0
 #   (sha256 2110579...653 for the latin-1 fixture);
 #   UTF-8 note opens/saves; close dialog keeps window+draft on "Keep editing"
 #   (window close AND app.quit) and closes on "Discard changes and close".
+
+# ---- Editor integrity follow-up: line endings (F5), focus-time encoding (F9),
+# ---- and the best-effort encoding write guard (F3b)
+$ node --test --test-reporter=spec test/renderer-vault.test.mjs
+# RED: renderer line-ending + focus-encoding tests written first
+ℹ tests 29
+ℹ pass 24
+ℹ fail 5
+#   CRLF save, untouched CRLF save, lone-CR edit, mixed-ending edit, and
+#   focus-time INVALID_ENCODING (checkForExternalChange returned silently).
+#   The non-EOL byte test (NUL, U+2028, tabs, trailing spaces, NFD, emoji)
+#   passed already: only CR/CRLF were affected.
+
+$ npm test
+# GREEN: full suite after implementation
+ℹ tests 171
+ℹ pass 171
+ℹ fail 0
+
+$ PUMICE_LOCAL_PREFIX=<extracted GTK prefix> npm run smoke:headless
+PUMICE_SMOKE_RESULT {"ok":true,...,"rendererErrors":[],
+"vaultFlow":{...,"saved":true,"status":"Saved notes/daily.md","diskContainsEdit":true}}
+exit=0
+
+$ PUMICE_LOCAL_PREFIX=<extracted GTK prefix> npm run e2e:data-safety
+PUMICE_E2E_RESULT {"ok":true,...}   # 31 checks, exit 0
+#   notes/crlf.md opens as LF text, one line appended and saved through the
+#   real UI, and the bytes on disk are 232063726c660d0a6c696e650d0a580d0a
+#   ('# crlf\r\nline\r\nX\r\n') - CRLF preserved;
+#   the open note replaced with latin-1 bytes + window focus shows the
+#   "not UTF-8" banner, keeps the dirty draft, offers no reload/overwrite;
+#   all earlier encoding, byte-preservation and close-guard checks still pass.

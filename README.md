@@ -140,6 +140,16 @@ PUMICE_SMOKE_SCREENSHOT=/tmp/pumice.png npm run smoke:headless
   refused with `INVALID_ENCODING`; convert it in another editor first. The
   listing reads each note once to detect this, so opening a vault of very large
   notes has a one-off read cost.
+- Line endings: the editor's textarea can only hold LF, so the renderer
+  remembers how a note ended its lines (CRLF, lone CR, or a mix) and puts them
+  back when it saves an edit. A note whose text was not changed is written back
+  byte-identically; in a mixed-ending note each existing line keeps its own
+  ending and lines typed afterwards use the note's most common ending. Nothing
+  else is normalised: NUL, U+2028/U+2029, tabs, trailing spaces, NFD and emoji
+  round-trip byte-identically.
+- A note that turns non-UTF-8 on disk while it is open is announced the next
+  time the window regains focus (or when a save is refused); the draft stays in
+  the editor and no overwrite is offered.
 - Unsaved work is protected by the close dialog only: drafts are not auto-saved
   to a journal and are not recovered after a crash or after choosing
   "Discard changes and close". A renderer that has already crashed cannot ask,
@@ -175,6 +185,12 @@ integration seams documented in
   best-effort, not race-free.
 - A note that is not valid UTF-8 is never decoded into the editor, so saving
   cannot re-encode it; `writeMarkdown` also refuses to replace such a file.
+  That refusal is a check before the atomic rename, like the conflict check, so
+  a third-party non-UTF-8 write landing in between is not detected afterwards.
+  Pumice's own save paths never write non-UTF-8 bytes.
+- Edits are saved with the note's own line endings: the renderer re-applies the
+  CRLF, lone-CR or mixed endings it saw when it read the note, and writes an
+  unedited note back byte-identically.
 - No telemetry, update check, remote assets or network requests at runtime.
 - Tests and the smoke run write only to temporary directories; fixture vaults
   are copied into the OS temp dir and removed afterwards.

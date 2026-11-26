@@ -12,6 +12,10 @@
  *     on disk stay identical;
  *  2. closing the window with a dirty draft asks first: "Keep editing" leaves
  *     the window and the draft alive, "Discard changes and close" closes it.
+ *  3. a CRLF note keeps its CRLF line endings when it is edited and saved (the
+ *     textarea itself only ever holds LF);
+ *  4. a note replaced with non-UTF-8 bytes while it is open is announced when
+ *     the window regains focus, with the draft kept and no overwrite offered.
  *
  * The dialog is a stub so the run can be automated; everything else is the
  * shipped code path. Prints one `PUMICE_E2E_RESULT {...}` line and exits 0 only
@@ -33,6 +37,7 @@ const { VaultSession } = require('../src/main/vault-session.js');
 const LATIN1 = Buffer.from('café note\n', 'latin1');
 const UTF16LE = Buffer.from('\ufeffutf16 note\n', 'utf16le');
 const UTF8 = '# plain utf8 note\n';
+const CRLF = Buffer.from('# crlf\r\nline\r\n', 'utf8');
 
 app.disableHardwareAcceleration();
 
@@ -94,7 +99,7 @@ const rendererScript = `(async () => {
 
   const rows = await waitFor(() => {
     const items = document.querySelectorAll('[data-testid="file-items"] li.file-item');
-    return items.length === 3 ? Array.from(items) : null;
+    return items.length === 4 ? Array.from(items) : null;
   }, 8000);
   if (!rows) throw new Error('file list never populated');
 
@@ -138,6 +143,28 @@ const rendererScript = `(async () => {
     return /^Saved /.test(text) ? text : null;
   }, 5000);
 
+  // A CRLF note opens as LF text (the textarea cannot hold CR), and an edit
+  // saved from it must go back to disk with its CRLF endings intact.
+  const crlfRow = rows.find((item) => item.dataset.path === 'notes/crlf.md');
+  crlfRow.click();
+  const crlfTextarea = await waitFor(() => {
+    const element = q('note-editor');
+    return element && !element.hidden && element.value.indexOf('crlf') !== -1 ? element : null;
+  }, 5000);
+  if (!crlfTextarea) throw new Error('CRLF note never opened');
+  const crlfShown = crlfTextarea.value;
+  crlfTextarea.value = crlfShown + 'X\\n';
+  crlfTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+  q('save-note-button').click();
+  const crlfSavedStatus = await waitFor(() => {
+    const text = q('status-text').textContent.trim();
+    return text.startsWith('Saved notes/crlf.md') ? text : null;
+  }, 5000);
+
+  // Re-open the UTF-8 note so the dirty-close checks below act on it.
+  utf8Row.click();
+  await waitFor(() => q('note-editor').value.indexOf('edited by e2e') !== -1, 5000);
+
   const draft = 'draft that must survive a cancelled close\\n';
   textarea.value = draft;
   textarea.dispatchEvent(new Event('input', { bubbles: true }));
@@ -150,6 +177,8 @@ const rendererScript = `(async () => {
     readUtf16,
     metaOnUtf8,
     savedStatus,
+    crlfShown,
+    crlfSavedStatus,
     dirty: controller.getState().dirty,
     draft,
   };
@@ -160,6 +189,7 @@ async function run() {
   fs.writeFileSync(path.join(root, 'utf8.md'), UTF8);
   fs.writeFileSync(path.join(root, 'notes', 'latin1.md'), LATIN1);
   fs.writeFileSync(path.join(root, 'notes', 'utf16.md'), UTF16LE);
+  fs.writeFileSync(path.join(root, 'notes', 'crlf.md'), CRLF);
 
   const session = new VaultSession();
   await session.open(root);
@@ -203,6 +233,16 @@ async function run() {
   const utf8OnDisk = fs.readFileSync(path.join(root, 'utf8.md'));
   check('UTF-8 edit reached the disk', utf8OnDisk.equals(Buffer.from('# edited by e2e\n', 'utf8')), { sha256: sha(utf8OnDisk) });
 
+  // --- F5: CRLF line endings survive an editor save ----------------------
+  const crlfOnDisk = fs.readFileSync(path.join(root, 'notes', 'crlf.md'));
+  check('the CRLF note is listed as UTF-8', !/not UTF-8/i.test(rows['notes/crlf.md'].tag), rows['notes/crlf.md']);
+  check('the editor shows a CRLF note as LF text', result.crlfShown === '# crlf\nline\n', result.crlfShown);
+  check(
+    'saving an edit keeps the CRLF line endings',
+    crlfOnDisk.equals(Buffer.from('# crlf\r\nline\r\nX\r\n', 'utf8')),
+    { hex: crlfOnDisk.toString('hex'), status: result.crlfSavedStatus },
+  );
+
   // --- Fix 2: dirty close -------------------------------------------------
   check('editor is dirty before the close attempt', result.dirty === true, result.dirty);
   check('cancelled close wrote nothing to disk', fs.readFileSync(path.join(root, 'utf8.md')).equals(Buffer.from('# edited by e2e\n', 'utf8')));
@@ -232,6 +272,48 @@ async function run() {
     sha256: sha(fs.readFileSync(path.join(root, 'notes', 'latin1.md'))),
   });
   check('UTF-16LE bytes are unchanged', fs.readFileSync(path.join(root, 'notes', 'utf16.md')).equals(UTF16LE));
+
+  // --- F9: focus-time warning when the open note turns non-UTF-8 -----------
+  fs.writeFileSync(path.join(root, 'utf8.md'), LATIN1);
+  const focusResult = await window.webContents.executeJavaScript(`(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const q = (id) => document.querySelector('[data-testid="' + id + '"]');
+    window.dispatchEvent(new Event('focus'));
+    const started = Date.now();
+    while (Date.now() - started < 3000) {
+      const banner = q('editor-banner-text').textContent;
+      if (banner) {
+        return {
+          banner,
+          bannerVisible: q('editor-banner').hidden === false,
+          editorText: q('note-editor').value,
+          reloadHidden: q('banner-reload-button').hidden,
+          overwriteHidden: q('banner-overwrite-button').hidden,
+          status: q('status-text').textContent,
+          statusState: q('status-text').dataset.state,
+          dirty: window.pumiceVault.getState().dirty,
+        };
+      }
+      await sleep(25);
+    }
+    return { banner: '', timedOut: true };
+  })()`);
+
+  check(
+    'a note that turns non-UTF-8 on disk is announced on focus',
+    /not UTF-8/i.test(focusResult.banner) && focusResult.bannerVisible === true,
+    focusResult,
+  );
+  check(
+    'the dirty draft survives the note turning non-UTF-8',
+    focusResult.editorText === result.draft && focusResult.dirty === true,
+    focusResult,
+  );
+  check(
+    'no reload or overwrite is offered for a non-UTF-8 note',
+    focusResult.reloadHidden === true && focusResult.overwriteHidden === true,
+    focusResult,
+  );
 
   const closed = new Promise((resolve) => window.once('closed', resolve));
   nextDialogResponse.value = 1; // Discard changes and close

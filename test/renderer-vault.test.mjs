@@ -569,3 +569,136 @@ test('beforeunload is only cancelled while the editor has unsaved changes', asyn
   textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
   assert.equal(dispatch().defaultPrevented, false, 'reverting the text clears the guard');
 });
+
+// ---- line endings: a textarea normalises CR/CRLF to LF on assignment -------
+
+function noteWith(content, extra = {}) {
+  return {
+    ok: true,
+    note: {
+      path: 'notes/daily.md',
+      name: 'daily.md',
+      content,
+      version: 'v1',
+      size: Buffer.byteLength(content, 'utf8'),
+      mtimeMs: 1,
+      ...extra,
+    },
+  };
+}
+
+function inputEvent(document) {
+  return new document.defaultView.Event('input', { bubbles: true });
+}
+
+test('a CRLF note is shown as LF text but saved with its CRLF line endings', async () => {
+  const { q, controller, api, document } = await openVaultAndNote({
+    handlers: { readNote: () => noteWith('# crlf\r\nline\r\n') },
+  });
+  const textarea = q('note-editor');
+
+  // The textarea cannot hold CR: it normalises the value to LF.
+  assert.equal(textarea.value, '# crlf\nline\n');
+  assert.equal(controller.getState().dirty, false, 'normalisation alone is not an edit');
+
+  textarea.value = '# crlf\nline\nX\n';
+  textarea.dispatchEvent(inputEvent(document));
+  assert.equal(controller.getState().dirty, true);
+
+  await controller.save();
+
+  assert.deepEqual(api.calls.at(-1), [
+    'writeNote',
+    'notes/daily.md',
+    '# crlf\r\nline\r\nX\r\n',
+    'v1',
+  ]);
+});
+
+test('saving an untouched CRLF note writes the original bytes back unchanged', async () => {
+  const { q, controller, api } = await openVaultAndNote({
+    handlers: { readNote: () => noteWith('# crlf\r\nline\r\n') },
+  });
+
+  assert.equal(q('note-editor').value, '# crlf\nline\n');
+  await controller.save();
+
+  assert.deepEqual(api.calls.at(-1), ['writeNote', 'notes/daily.md', '# crlf\r\nline\r\n', 'v1']);
+});
+
+test('a lone-CR note keeps its CR and LF line endings when edited', async () => {
+  const { q, controller, api, document } = await openVaultAndNote({
+    handlers: { readNote: () => noteWith('# lone\rcarriage\n') },
+  });
+  const textarea = q('note-editor');
+  assert.equal(textarea.value, '# lone\ncarriage\n');
+
+  textarea.value = '# lone\ncarriage\nmore\n';
+  textarea.dispatchEvent(inputEvent(document));
+  await controller.save();
+
+  assert.deepEqual(api.calls.at(-1), [
+    'writeNote',
+    'notes/daily.md',
+    '# lone\rcarriage\nmore\n',
+    'v1',
+  ]);
+});
+
+test("a mixed-ending note keeps each line's original ending and uses the common one for new lines", async () => {
+  const { q, controller, api, document } = await openVaultAndNote({
+    handlers: { readNote: () => noteWith('a\r\nb\nc\r') },
+  });
+  const textarea = q('note-editor');
+  assert.equal(textarea.value, 'a\nb\nc\n');
+
+  textarea.value = 'a\nb\nc\nd\n';
+  textarea.dispatchEvent(inputEvent(document));
+  await controller.save();
+
+  // Each existing line keeps its own ending; the appended line uses the most
+  // common ending in the note (a three-way tie here: CRLF wins over LF and CR).
+  assert.deepEqual(api.calls.at(-1), ['writeNote', 'notes/daily.md', 'a\r\nb\nc\rd\r\n', 'v1']);
+});
+
+test('non-EOL bytes (NUL, U+2028, tabs, trailing spaces, NFD, emoji) are untouched', async () => {
+  const content = 'cafe\u0301\t \u2028emoji 😀\u0000tail\n';
+  const { q, controller, api } = await openVaultAndNote({
+    handlers: { readNote: () => noteWith(content) },
+  });
+
+  assert.equal(q('note-editor').value, content);
+  await controller.save();
+
+  assert.deepEqual(api.calls.at(-1), ['writeNote', 'notes/daily.md', content, 'v1']);
+});
+
+test('focus-time detection reports a note that turned non-UTF-8 on disk', async () => {
+  const { q, controller, api, document } = await openVaultAndNote({
+    handlers: {
+      statNote: () => ({
+        ok: false,
+        error: {
+          code: 'INVALID_ENCODING',
+          message: 'Note is not valid UTF-8: notes/daily.md (its bytes would be rewritten)',
+        },
+      }),
+    },
+  });
+  const textarea = q('note-editor');
+  textarea.value = '# my draft\n';
+  textarea.dispatchEvent(inputEvent(document));
+  const readsBefore = api.calls.filter(([name]) => name === 'readNote').length;
+
+  await controller.checkForExternalChange();
+
+  assert.equal(textarea.value, '# my draft\n', 'the draft must survive');
+  assert.equal(controller.getState().dirty, true);
+  assert.equal(controller.getState().externalChange, true);
+  assert.equal(api.calls.filter(([name]) => name === 'readNote').length, readsBefore);
+  assert.equal(q('editor-banner').hidden, false);
+  assert.match(q('editor-banner-text').textContent, /not UTF-8/i);
+  assert.equal(q('banner-reload-button').hidden, true, 'no reload is offered');
+  assert.equal(q('banner-overwrite-button').hidden, true, 'no overwrite is offered');
+  assert.equal(q('status-text').dataset.state, 'warning');
+});

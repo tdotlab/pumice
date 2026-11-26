@@ -101,6 +101,11 @@ Returns `{ relativePath, content, version, size, mtimeMs }`.
 - `content` is the file decoded as UTF-8. `size` is the byte length and
   `version` is the sha256 hex digest of the file bytes (`content` is lossless
   for UTF-8 files; BOMs and CRLF line endings are preserved as-is).
+- Line endings are part of `content` and round-trip unchanged through this API:
+  CRLF and lone CR are not normalised, and BOMs are kept. The desktop editor is
+  the exception — its plain `<textarea>` can only hold LF — so the renderer
+  records the note's endings when it reads it and re-applies them on save (see
+  README, "Known limits").
 - Rejects with `INVALID_ENCODING` when the bytes are not valid UTF-8. The file
   is not decoded at all: `Buffer#toString('utf8')` would replace every invalid
   byte with U+FFFD, and saving that text back would destroy the original
@@ -134,6 +139,11 @@ the file is left untouched, whatever expectation is supplied (or none): the
 caller's text cannot represent those bytes, so replacing them would be data
 loss. Pumice never converts a note's encoding implicitly; convert it in another
 editor and reopen it.
+
+Like the conflict check (see *Conflict-check scope*), the encoding guard is a
+compare-then-rename check, not an atomic one: a third-party write of non-UTF-8
+bytes landing between the check and the rename can be replaced by the save and
+is not detected afterwards. Pumice's own paths never produce such a write.
 
 ### Atomicity and failure behaviour
 
@@ -223,7 +233,10 @@ The app consumes this API only in the main process, through
 `stat(relPath)` is an app-level convenience: it reads and hashes the current
 file (returning `null` when it no longer exists) so the editor can compare
 versions on window focus without holding file handles open. It inherits the
-read path's `INVALID_ENCODING` refusal.
+read path's `INVALID_ENCODING` refusal; the renderer treats that refusal on
+focus as an external change and shows its encoding banner (draft kept, no
+overwrite offered), because a note that stopped being UTF-8 cannot be hashed
+into a version at all.
 
 ## Out of scope (this milestone)
 
