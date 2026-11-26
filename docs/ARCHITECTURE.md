@@ -53,6 +53,7 @@ main/renderer web boundary Mike's concept describes.
 │   ├─ window.js      BrowserWindow options + loadFile(renderer/index.html)   │
 │   ├─ menu.js        native menu; shell actions forwarded to renderer        │
 │   ├─ lifecycle.js   window-all-closed / activate / second-instance          │
+│   ├─ close-guard.js dirty-close dialog on will-prevent-unload               │
 │   ├─ ipc.js         shell:get-app-info, shell:renderer-ready                │
 │   ├─ vault-session.js  one open vault over src/vault.js (list/read/write)   │
 │   ├─ vault-ipc.js      vault:* channels, plain-data result envelopes        │
@@ -64,6 +65,7 @@ main/renderer web boundary Mike's concept describes.
 │ index.html → styles.css                                                     │
 │ ui.mjs          shell view: vault title, file list, status, Open vault      │
 │ vault-ui.mjs    controller: open/list/read/edit/save/conflict handling      │
+│                 + encoding refusal + dirty-close beforeunload               │
 │ renderer.mjs    boot, error capture, preload wiring, window.pumiceShell     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -284,11 +286,13 @@ Run with `npm test`. Node's test runner discovers both `test/*.test.mjs` and
 | `preload-api.test.mjs` | real preload source in a VM: one frozen bridge, shell and vault channels, argument validation, unsubscribe, filtering |
 | `renderer-shell.test.mjs` | CSP, single module script, landmarks, empty states, editor markup defaults |
 | `renderer-ui.test.mjs` | open request, vault/file rendering, empty vault, reset, status states, XSS, destroy |
-| `renderer-vault.test.mjs` | open/cancel/error, read, edit/dirty, save, conflict, overwrite, reload, external change, deleted note, note switching, destroy |
-| `vault-session.test.mjs` | one open vault, listing, read/write, conflict/deleted, stat, NO_VAULT, traversal, non-Markdown |
+| `renderer-vault.test.mjs` | open/cancel/error, read, edit/dirty, save, conflict, overwrite, reload, external change, deleted note, note switching, non-UTF-8 refusal, dirty-close beforeunload, destroy |
+| `close-guard.test.mjs` | dirty-close dialog: discard allows the unload; keep-editing, a failing dialog and dispose keep it |
+| `vault-session.test.mjs` | one open vault, listing, read/write, conflict/deleted, stat, NO_VAULT, traversal, non-Markdown, utf8 listing flag |
 | `vault-ipc.test.mjs` | exact vault channels, envelopes, cancelled dialog, conflict, explicit overwrite, validation, error serialisation |
 | `smoke.test.mjs` | snapshot/vault-flow validation, generated-script syntax and escaping, fixture copy/cleanup, disk verification |
-| `open/list-read/write/security.test.js` | vault core safety, atomicity and conflict tests (41 tests) |
+| `open/list-read/write/security.test.js` | vault core safety, atomicity, conflict and byte-preservation tests |
+| `encoding.test.js` | non-UTF-8 refusal (latin-1, UTF-16LE/BE with BOM), `utf8` listing flag, byte-identical BOM/CRLF round trip |
 
 Test-first evidence for this slice:
 
@@ -297,8 +301,46 @@ Test-first evidence for this slice:
   `src/main/vault-ipc.js`, `src/main/smoke-vault.js`,
   `src/renderer/vault-ui.mjs`, missing editor markup, and the old preload and
   smoke contracts.
-- After implementation: **141 tests, 141 pass, 0 fail** (`npm test`, exit 0).
+- After implementation: **141 tests, 141 pass, 0 fail** (`npm test`, exit 0) at
+  that milestone; the suite has grown since (see the follow-up below).
   The red and green summaries are appended to `docs/red-green-log.txt`.
+
+### Data-safety follow-up: non-UTF-8 notes and dirty close
+
+QA found two data-loss defects at the first milestone (commit `fcacbdb`):
+`readMarkdown` decoded with `buffer.toString('utf8')`, so saving a note that was
+not UTF-8 permanently replaced its bytes with U+FFFD; and no close handler
+existed, so the titlebar X or Quit discarded a dirty draft.
+
+- **Encoding policy — refuse, never re-encode.** `readMarkdown` validates the
+  bytes with `require('node:buffer').isUtf8` and raises `INVALID_ENCODING`
+  instead of decoding. The listing reports `utf8` per note, the renderer tags
+  such a note "not UTF-8", refuses to open it, and the status bar reports
+  "not UTF-8" instead of assuming UTF-8. `writeMarkdown` also refuses to
+  replace a non-UTF-8 file, so no path can rewrite one. UTF-8 with a BOM and
+  CRLF still round-trip byte-identically.
+- **Dirty close.** The renderer cancels `beforeunload` while the editor is
+  dirty; `src/main/close-guard.js` answers Electron's `will-prevent-unload`
+  with a *Keep editing / Discard changes and close* dialog and only calls
+  `event.preventDefault()` (allowing the unload) when discarding is chosen. A
+  dialog failure keeps the window. Quit goes through the same guard because it
+  closes the window.
+
+Test-first evidence for the follow-up:
+
+- Red: the new tests were run before the implementation — `tests 58 / pass 43 /
+  fail 15` in the focused run (encoding refusal, `utf8` listing flag, IPC
+  `INVALID_ENCODING` and missing `expectedVersion`, renderer refusal banner and
+  status meta, `beforeunload`, and the missing `close-guard.js`).
+- Green: **165 tests, 165 pass, 0 fail** (`npm test`, exit 0).
+- `npm run smoke:headless`: exit 0, `"ok":true`, `diskContainsEdit:true`,
+  `rendererErrors:[]`.
+- `npm run e2e:data-safety` (real Electron, headless Ozone, 24 checks): exit 0,
+  `"ok":true` — latin-1 and UTF-16LE notes are listed and tagged, refused by
+  `vault:read`/`vault:write` with `INVALID_ENCODING` while their bytes stay
+  unchanged; a UTF-8 note opens and saves; the close dialog keeps the window
+  and the draft on "Keep editing" (for both window close and Quit) and closes
+  the window on "Discard changes and close".
 
 The Electron smoke run is separate from `npm test` because it launches a real
 browser process. It now drives the whole workflow through the UI — click **Open
@@ -341,7 +383,10 @@ and geometry were verified instead.
 - macOS/Windows lifecycle branches are covered by unit tests with injected
   platform values, not by running on those systems.
 - The editor is a plain textarea: no Markdown preview, syntax highlighting,
-  wrapping toggle, or WYSIWYG. Markdown is stored verbatim as UTF-8 text.
+  wrapping toggle, or WYSIWYG. Markdown is stored verbatim as UTF-8 text; a note
+  that is not valid UTF-8 is refused rather than converted.
+- Unsaved work is protected only by the close dialog: there is no autosave,
+  journal or crash recovery, and a crashed renderer cannot ask.
 - There is no search, note creation/deletion, rename, recovery UI, or file
   watcher. External changes are detected on save (conflict) and when the window
   regains focus (version comparison); a change made while the app is focused

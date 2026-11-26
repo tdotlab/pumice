@@ -259,3 +259,35 @@ exit=0
 # Real Electron: copied fixture vault -> Open vault -> open notes/daily.md ->
 # edit -> Save -> main process read the marker back from disk.
 # Temp vault removed on exit (no pumice-smoke-* left behind).
+
+# --- data-safety follow-up: non-UTF-8 notes + dirty close (QA t_df274a54) ----
+
+$ node --test --test-reporter=spec test/encoding.test.js test/close-guard.test.mjs \
+    test/renderer-vault.test.mjs test/vault-session.test.mjs test/vault-ipc.test.mjs
+# RED: implementation intentionally absent (new tests written first)
+ℹ tests 58
+ℹ pass 43
+ℹ fail 15
+#   readMarkdown/listMarkdown/writeMarkdown encoding, list()/read()/stat()
+#   non-UTF-8, vault:read INVALID_ENCODING, vault:write missing expectedVersion,
+#   renderer "not UTF-8" tag/banner/status meta, beforeunload,
+#   and test/close-guard.test.mjs (src/main/close-guard.js did not exist).
+
+$ npm test
+# GREEN: full suite after implementation
+ℹ tests 165
+ℹ pass 165
+ℹ fail 0
+
+$ PUMICE_LOCAL_PREFIX=<extracted GTK prefix> npm run smoke:headless
+PUMICE_SMOKE_RESULT {"ok":true,...,"rendererErrors":[],
+"vaultFlow":{...,"saved":true,"status":"Saved notes/daily.md","diskContainsEdit":true}}
+exit=0
+
+$ PUMICE_LOCAL_PREFIX=<extracted GTK prefix> npm run e2e:data-safety
+PUMICE_E2E_RESULT {"ok":true,...}   # 24 checks, exit 0
+#   latin-1 + UTF-16LE: listed, tagged "not UTF-8", aria-disabled, refused by
+#   vault:read/vault:write with INVALID_ENCODING, bytes unchanged
+#   (sha256 2110579...653 for the latin-1 fixture);
+#   UTF-8 note opens/saves; close dialog keeps window+draft on "Keep editing"
+#   (window close AND app.quit) and closes on "Discard changes and close".

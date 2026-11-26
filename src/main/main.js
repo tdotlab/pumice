@@ -3,6 +3,7 @@
 const path = require('node:path');
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require('electron');
 const { parseArgs } = require('./cli.js');
+const { installCloseGuard } = require('./close-guard.js');
 const { acquireSingleInstanceLock, installLifecycle } = require('./lifecycle.js');
 const { registerIpcHandlers } = require('./ipc.js');
 const { buildMenuTemplate } = require('./menu.js');
@@ -40,6 +41,8 @@ function createMainWindow() {
     BrowserWindow,
     preloadPath: path.join(__dirname, '..', 'preload', 'preload.js'),
   });
+  // The renderer cancels beforeunload while dirty; ask before discarding.
+  installCloseGuard({ window: mainWindow, dialog });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });

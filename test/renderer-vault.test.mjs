@@ -449,3 +449,123 @@ test('destroy detaches the file list and editor listeners', async () => {
 
   assert.equal(api.calls.length, before);
 });
+
+// ---- non-UTF-8 notes and the dirty-close guard ----------------------------
+
+const MIXED_VAULT = {
+  ok: true,
+  vault: {
+    name: 'Field Notes',
+    root: '/vault',
+    files: [
+      { path: 'notes/daily.md', name: 'daily.md', size: 8, mtimeMs: 1, utf8: true },
+      { path: 'notes/latin1.md', name: 'latin1.md', size: 10, mtimeMs: 2, utf8: false },
+    ],
+  },
+};
+
+test('a non-UTF-8 note is marked not editable in the list and is never opened', async () => {
+  const { q, controller, api } = await mount({ handlers: { openVault: () => MIXED_VAULT } });
+  await controller.openVault();
+
+  const row = q('file-items').querySelector('li[data-path="notes/latin1.md"]');
+  assert.equal(row.getAttribute('aria-disabled'), 'true');
+  assert.match(row.className, /is-uneditable/);
+  assert.match(row.textContent, /not UTF-8/i);
+
+  const readsBefore = api.calls.filter(([name]) => name === 'readNote').length;
+  row.click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(api.calls.filter(([name]) => name === 'readNote').length, readsBefore);
+  assert.equal(q('note-editor').hidden, true);
+  assert.equal(q('editor-banner').hidden, false);
+  assert.match(q('editor-banner-text').textContent, /not UTF-8/i);
+  assert.equal(q('status-meta').textContent, 'Markdown · not UTF-8');
+  assert.equal(controller.getState().note, null);
+});
+
+test('a read refused with INVALID_ENCODING shows the encoding banner, not a decoded note', async () => {
+  const { q, controller } = await mount({
+    handlers: {
+      openVault: () => MIXED_VAULT,
+      readNote: () => ({
+        ok: false,
+        error: { code: 'INVALID_ENCODING', message: 'Note is not valid UTF-8: notes/latin1.md' },
+      }),
+    },
+  });
+  await controller.openVault();
+
+  // The stale-listing path: the row claims UTF-8, the read refuses.
+  const row = q('file-items').querySelector('li[data-path="notes/daily.md"]');
+  row.dataset.utf8 = 'true';
+  row.click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(q('note-editor').hidden, true);
+  assert.equal(q('editor-banner').hidden, false);
+  assert.match(q('editor-banner-text').textContent, /not UTF-8/i);
+  assert.equal(q('status-meta').textContent, 'Markdown · not UTF-8');
+  assert.equal(q('status-text').dataset.state, 'warning');
+  assert.equal(controller.getState().note, null);
+});
+
+test('the status bar reports the encoding of the open note instead of hard-coding UTF-8', async () => {
+  const { q, controller } = await openVaultAndNote();
+
+  assert.equal(q('status-meta').textContent, 'Markdown · UTF-8');
+  assert.equal(controller.getState().note, 'notes/daily.md');
+});
+
+test('a save refused because the note is not UTF-8 keeps the draft and explains why', async () => {
+  const { q, controller } = await openVaultAndNote({
+    handlers: {
+      writeNote: () => ({
+        ok: false,
+        error: {
+          code: 'INVALID_ENCODING',
+          message: 'Refusing to rewrite a note that is not valid UTF-8: notes/daily.md',
+        },
+      }),
+    },
+  });
+  const textarea = q('note-editor');
+  textarea.value = '# Draft that must not be written\n';
+  textarea.dispatchEvent(new (q('note-editor').ownerDocument.defaultView.Event)('input', { bubbles: true }));
+
+  await controller.save();
+
+  assert.equal(textarea.value, '# Draft that must not be written\n');
+  assert.equal(controller.getState().dirty, true);
+  assert.equal(q('editor-banner').hidden, false);
+  assert.match(q('editor-banner-text').textContent, /not UTF-8/i);
+  assert.equal(q('status-text').dataset.state, 'warning');
+});
+
+test('beforeunload is only cancelled while the editor has unsaved changes', async () => {
+  const { q, controller, window } = await openVaultAndNote();
+  const dispatch = () => {
+    const event = new window.Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(event);
+    return event;
+  };
+
+  const clean = dispatch();
+  assert.equal(clean.defaultPrevented, false, 'a clean editor must close without a prompt');
+
+  const textarea = q('note-editor');
+  textarea.value = '# Draft that must not vanish\n';
+  textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(controller.getState().dirty, true);
+
+  const dirty = dispatch();
+  assert.equal(dirty.defaultPrevented, true, 'a dirty editor must block the close');
+  // The handler also sets event.returnValue for engines that read the legacy
+  // string; setting it (or preventing default) is what Electron observes.
+  assert.equal(dirty.returnValue, false, 'a cancelled beforeunload reports returnValue false');
+
+  textarea.value = '# Daily\n';
+  textarea.dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(dispatch().defaultPrevented, false, 'reverting the text clears the guard');
+});

@@ -11,6 +11,7 @@ const {
   VaultError,
   VaultSecurityError,
   VaultConflictError,
+  VaultEncodingError,
   DEFAULT_EXTENSIONS
 } = require('./vault.js');
 
@@ -19,5 +20,6 @@ module.exports = {
   VaultError,
   VaultSecurityError,
   VaultConflictError,
+  VaultEncodingError,
   DEFAULT_EXTENSIONS
 };

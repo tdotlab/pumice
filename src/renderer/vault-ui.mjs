@@ -15,6 +15,20 @@
 
 const EMPTY_TITLE = 'Nothing open';
 const DIRTY_LABEL = 'Unsaved changes';
+const STATUS_META_UTF8 = 'Markdown · UTF-8';
+const STATUS_META_NOT_UTF8 = 'Markdown · not UTF-8';
+
+/**
+ * A note whose bytes are not valid UTF-8 is never loaded into the editor:
+ * decoding it with `toString('utf8')` replaces every invalid byte with U+FFFD,
+ * and saving that text back would destroy the original file.
+ */
+function notUtf8Message(notePath) {
+  return (
+    `“${notePath}” is not UTF-8. Editing it here would rewrite its bytes, so ` +
+    'Pumice leaves the file untouched. Convert it to UTF-8 in another editor to work on it.'
+  );
+}
 
 function requireElement(document, testId) {
   const element = document.querySelector(`[data-testid="${testId}"]`);
@@ -59,6 +73,17 @@ export function createVaultController({ document, api, view, confirm = () => tru
 
   function setStatus(message, statusState = 'ready') {
     if (!destroyed) view.setStatus(message, statusState);
+  }
+
+  function setStatusMeta(message) {
+    if (destroyed) return;
+    if (typeof view.setStatusMeta === 'function') view.setStatusMeta(message);
+  }
+
+  /** The listing entry for a note, when the row came from a vault listing. */
+  function listedFile(notePath) {
+    const files = state.vault && Array.isArray(state.vault.files) ? state.vault.files : [];
+    return files.find((file) => file && file.path === notePath) ?? null;
   }
 
   function showBanner(message, { reload = false, overwrite = false } = {}) {
@@ -107,6 +132,7 @@ export function createVaultController({ document, api, view, confirm = () => tru
     elements.textarea.hidden = true;
     elements.editorEmpty.hidden = false;
     elements.documentTitle.textContent = EMPTY_TITLE;
+    setStatusMeta('Markdown');
     hideBanner();
     markActive(null);
     setDirty(false, { updateStatus: false });
@@ -127,6 +153,7 @@ export function createVaultController({ document, api, view, confirm = () => tru
     elements.textarea.hidden = false;
     elements.editorEmpty.hidden = true;
     elements.documentTitle.textContent = note.path;
+    setStatusMeta(STATUS_META_UTF8);
     hideBanner();
     markActive(note.path);
     setDirty(false, { updateStatus: false });
@@ -186,6 +213,10 @@ export function createVaultController({ document, api, view, confirm = () => tru
   async function loadNoteFromDisk(notePath, { quiet = false } = {}) {
     const result = await callApi(api.readNote, notePath);
     if (!result?.ok) {
+      if (result?.error?.code === 'INVALID_ENCODING') {
+        refuseNotUtf8(notePath);
+        return result;
+      }
       showBanner(`Could not open ${notePath}: ${errorMessage(result, 'unknown error')}`, {});
       setStatus('Could not open note', 'error');
       return result;
@@ -195,10 +226,27 @@ export function createVaultController({ document, api, view, confirm = () => tru
     return result;
   }
 
+  /**
+   * Explain that the note was not opened, and leave every byte on disk alone.
+   * The status bar stops claiming UTF-8 for a note Pumice refused to decode.
+   */
+  function refuseNotUtf8(notePath) {
+    showBanner(notUtf8Message(notePath), {});
+    setStatus(`Not opened — “${notePath}” is not UTF-8`, 'warning');
+    if (!state.note) setStatusMeta(STATUS_META_NOT_UTF8);
+  }
+
   async function openNote(notePath) {
     if (destroyed) return;
     if (typeof notePath !== 'string' || notePath.trim() === '') return;
     if (state.note && state.note.path === notePath) return;
+
+    const listed = listedFile(notePath);
+    if (listed && listed.utf8 === false) {
+      refuseNotUtf8(notePath);
+      return { ok: false, error: { code: 'INVALID_ENCODING', message: notUtf8Message(notePath) } };
+    }
+
     if (!confirmDiscardIfDirty()) {
       setStatus('Save or discard the current note before switching notes.', 'warning');
       return { ok: false, canceled: true };
@@ -250,6 +298,14 @@ export function createVaultController({ document, api, view, confirm = () => tru
         { reload: true, overwrite: true },
       );
       setStatus('Note changed on disk — not saved', 'warning');
+    } else if (error.code === 'INVALID_ENCODING') {
+      // The note stopped being UTF-8 (or was never editable) after it was read.
+      showBanner(
+        `“${notePath}” is not UTF-8 on disk. Pumice will not rewrite its bytes, ` +
+          'so the save was refused. Your edits are still in the editor.',
+        {},
+      );
+      setStatus('Save refused — note is not UTF-8', 'warning');
     } else {
       showBanner(
         `Could not save ${notePath}: ${errorMessage(result, 'unknown error')}. ` +
@@ -343,6 +399,23 @@ export function createVaultController({ document, api, view, confirm = () => tru
 
   // ---- wiring ---------------------------------------------------------------
 
+  /**
+   * Dirty-close guard, renderer half. Cancelling `beforeunload` is what makes
+   * Electron emit `will-prevent-unload` on the window; the main process
+   * (src/main/close-guard.js) then asks the user before discarding the draft.
+   */
+  const hostWindow = document.defaultView;
+  function handleBeforeUnload(event) {
+    if (!state.dirty) return undefined;
+    event.preventDefault();
+    event.returnValue = 'Unsaved changes in Pumice';
+    return event.returnValue;
+  }
+
+  if (hostWindow && typeof hostWindow.addEventListener === 'function') {
+    hostWindow.addEventListener('beforeunload', handleBeforeUnload);
+  }
+
   function handleInput() {
     if (destroyed || !state.note || state.saving) return;
     setDirty(elements.textarea.value !== state.note.content);
@@ -401,6 +474,9 @@ export function createVaultController({ document, api, view, confirm = () => tru
     elements.bannerReload.removeEventListener('click', handleReloadClick);
     elements.bannerOverwrite.removeEventListener('click', handleOverwriteClick);
     document.removeEventListener('keydown', handleShortcut);
+    if (hostWindow && typeof hostWindow.removeEventListener === 'function') {
+      hostWindow.removeEventListener('beforeunload', handleBeforeUnload);
+    }
   }
 
   function getState() {

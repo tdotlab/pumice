@@ -13,8 +13,12 @@ safe Markdown storage, and the open → browse → edit → save path.
 You can open a folder of Markdown notes, list them, open a note in a plain-text
 editor, and save it atomically. If another program changes the note, Pumice
 refuses to overwrite it and offers **Reload from disk** or an explicit
-**Overwrite with my version**. It does not yet preview Markdown, highlight
-syntax, search, create/delete/rename notes, or watch the filesystem live.
+**Overwrite with my version**. Notes whose bytes are not valid UTF-8 are listed
+but cannot be opened: decoding them would rewrite their bytes on save, so
+Pumice refuses and says so instead of corrupting the file. Closing the window
+with unsaved edits asks before discarding them. It does not yet preview
+Markdown, highlight syntax, search, create/delete/rename notes, or watch the
+filesystem live.
 
 Do not test on an irreplaceable vault. This milestone was exercised only on
 copied fixture vaults; no production vaults were used.
@@ -46,7 +50,7 @@ runtime once.
 
 ```bash
 npm install
-npm test          # 141 behavioural tests, no display needed
+npm test          # 165 behavioural tests, no display needed
 npm start         # opens the app; use a copied vault
 ```
 
@@ -90,6 +94,7 @@ PUMICE_SMOKE_SCREENSHOT=/tmp/pumice.png npm run smoke:headless
 | `npm run test:vault` | Vault core tests only (`*.test.js`) |
 | `npm run smoke` | Load the real window and drive open/edit/save (needs a display) |
 | `npm run smoke:headless` | Same smoke run through Chromium's Ozone headless platform |
+| `npm run e2e:data-safety` | Real Electron check of the non-UTF-8 refusal and the dirty-close dialog (headless Ozone) |
 
 ## What works now
 
@@ -108,6 +113,13 @@ PUMICE_SMOKE_SCREENSHOT=/tmp/pumice.png npm run smoke:headless
   (Ctrl/Cmd+S) and Reload
 - **Save atomically** through the vault core: temp file + fsync + rename,
   preserving the existing file mode; a failed write leaves the old note intact
+- **Encoding safety**: a note that is not valid UTF-8 is listed with a
+  "not UTF-8" tag and cannot be opened or saved — Pumice refuses with
+  `INVALID_ENCODING` instead of decoding it lossily and re-encoding it on save;
+  the status bar reports the open note's encoding rather than assuming UTF-8
+- **Dirty-close guard**: closing the window (or quitting) with unsaved edits
+  shows a native dialog — Keep editing / Discard changes and close — and the
+  window stays open unless discarding is chosen
 - **Conflict safety**: saving over a note changed or deleted on disk is refused
   and the draft stays in the editor; explicit reload or overwrite are separate
   user actions
@@ -123,6 +135,15 @@ PUMICE_SMOKE_SCREENSHOT=/tmp/pumice.png npm run smoke:headless
 - Plain textarea: no Markdown preview, syntax highlighting or WYSIWYG.
 - No search, note creation/deletion, rename, recovery UI or live file watcher.
   External changes are noticed on save and on window focus, not instantly.
+- Only UTF-8 notes are editable. A note whose bytes are not valid UTF-8
+  (latin-1, UTF-16 with a BOM, …) is still listed but tagged "not UTF-8" and
+  refused with `INVALID_ENCODING`; convert it in another editor first. The
+  listing reads each note once to detect this, so opening a vault of very large
+  notes has a one-off read cost.
+- Unsaved work is protected by the close dialog only: drafts are not auto-saved
+  to a journal and are not recovered after a crash or after choosing
+  "Discard changes and close". A renderer that has already crashed cannot ask,
+  so nothing protects a draft from a crashed renderer.
 - Conflict checking is compare-then-atomic-rename without an OS file lock. A
   third-party write landing between the version check and the rename can be
   overwritten by the save and is not detected afterwards. Conflict handling is
@@ -146,8 +167,14 @@ integration seams documented in
 
 - The renderer has no filesystem access; all IO goes through the main-process
   vault session, and paths are confined to the selected vault root.
-- Writes are atomic and version-checked, so another program's changes are never
-  silently overwritten.
+- Writes are atomic, and a save is refused when the note changed since it was
+  read. That check compares bytes and then renames without an OS lock, so a
+  third-party write landing in the small window between the check and the
+  rename is not detected afterwards (see Known limits and
+  [docs/API.md](docs/API.md#conflict-check-scope)). Conflict handling is
+  best-effort, not race-free.
+- A note that is not valid UTF-8 is never decoded into the editor, so saving
+  cannot re-encode it; `writeMarkdown` also refuses to replace such a file.
 - No telemetry, update check, remote assets or network requests at runtime.
 - Tests and the smoke run write only to temporary directories; fixture vaults
   are copied into the OS temp dir and removed afterwards.

@@ -35,6 +35,9 @@ function noteSummary(relativePath, stat) {
     name: displayName(relativePath),
     size: stat.size,
     mtimeMs: stat.mtimeMs,
+    // false: the note is not valid UTF-8 and must not be edited here;
+    // null: the bytes could not be inspected — the read path decides then.
+    utf8: typeof stat.utf8 === 'boolean' ? stat.utf8 : null,
   };
 }
 

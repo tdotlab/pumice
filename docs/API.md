@@ -76,12 +76,18 @@ relative to it and use `/` separators on every platform.
 ## `vault.listMarkdown(options?) → Promise<Entry[]>`
 
 Walks the vault and returns regular Markdown files, sorted by `relativePath`.
-Each entry is `{ relativePath, size, mtimeMs }`; contents are not read.
+Each entry is `{ relativePath, size, mtimeMs, utf8 }`.
 
 | option          | default | meaning                                                |
 | --------------- | ------- | ------------------------------------------------------ |
 | `recursive`     | `true`  | Recurse into subdirectories.                           |
 | `includeHidden` | `false` | Include files/directories whose name starts with `.`.  |
+
+`utf8` is `true` when the note's bytes are valid UTF-8, `false` when they are
+not (the note is listed but cannot be read or saved — see `INVALID_ENCODING`),
+and `null` when the bytes could not be inspected. Listing therefore reads each
+note once to validate its encoding; a vault of very large notes pays that cost
+when it is opened.
 
 - Symlinks are never listed, followed or recursed into.
 - Non-Markdown files, and directories whose name merely ends in `.md`, are not
@@ -95,6 +101,11 @@ Returns `{ relativePath, content, version, size, mtimeMs }`.
 - `content` is the file decoded as UTF-8. `size` is the byte length and
   `version` is the sha256 hex digest of the file bytes (`content` is lossless
   for UTF-8 files; BOMs and CRLF line endings are preserved as-is).
+- Rejects with `INVALID_ENCODING` when the bytes are not valid UTF-8. The file
+  is not decoded at all: `Buffer#toString('utf8')` would replace every invalid
+  byte with U+FFFD, and saving that text back would destroy the original
+  content. Pumice never opens such a note for editing; convert it to UTF-8 in
+  another editor first. UTF-8 with a BOM is valid UTF-8 and is allowed.
 - `relativePath` is the canonical vault-relative path (`notes/../a.md` →
   `a.md`).
 - Rejects with `NOT_MARKDOWN`, `INVALID_PATH`, `SECURITY`, `ENOENT`, `EISDIR`.
@@ -116,6 +127,13 @@ Options (optional; use one, `expectedVersion` preferred):
 With neither option the call is an unconditional create-or-overwrite (use it
 for brand-new notes only). The existing note mode (permissions) is preserved;
 new notes are created with the process umask applied (`0o666 & ~umask`).
+
+**Encoding policy.** `content` is always encoded as UTF-8. If the note already
+on disk is not valid UTF-8, the write is refused with `INVALID_ENCODING` and
+the file is left untouched, whatever expectation is supplied (or none): the
+caller's text cannot represent those bytes, so replacing them would be data
+loss. Pumice never converts a note's encoding implicitly; convert it in another
+editor and reopen it.
 
 ### Atomicity and failure behaviour
 
@@ -155,6 +173,7 @@ All deliberate failures are instances of `VaultError` with a stable `code`:
 | `SECURITY`       | path resolves outside the vault root, or a symlink is involved             |
 | `CONFLICT`       | external change detected (`VaultConflictError`, `.reason` is `modified` or `deleted`) |
 | `NOT_MARKDOWN`   | target extension is not in the vault's Markdown list                       |
+| `INVALID_ENCODING`| a note's bytes are not valid UTF-8; it is never decoded or rewritten     |
 | `ENOENT`         | vault, note or parent directory does not exist                             |
 | `ENOTDIR`        | vault path (or a path component) is not a directory                        |
 | `EISDIR`         | target is a directory                                                       |
@@ -196,11 +215,15 @@ The app consumes this API only in the main process, through
   because Electron does not preserve custom error properties across IPC.
 - The renderer's `writeNote` passes the `version` from the last read as
   `expectedVersion`; only an explicit, user-confirmed **Overwrite** sends
-  `null`.
+  `null`. The IPC handler rejects a payload that omits `expectedVersion`
+  entirely (`INVALID_OPTIONS`) instead of treating it as an unchecked
+  overwrite; `null` is the only way to request one, and the preload bridge
+  always sends the field.
 
 `stat(relPath)` is an app-level convenience: it reads and hashes the current
 file (returning `null` when it no longer exists) so the editor can compare
-versions on window focus without holding file handles open.
+versions on window focus without holding file handles open. It inherits the
+read path's `INVALID_ENCODING` refusal.
 
 ## Out of scope (this milestone)
 

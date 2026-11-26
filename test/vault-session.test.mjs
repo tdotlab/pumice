@@ -193,3 +193,49 @@ test('path traversal and non-Markdown targets are refused by the session', async
     );
   });
 });
+
+// ---- non-UTF-8 notes ------------------------------------------------------
+
+const LATIN1 = Buffer.from('café note\n', 'latin1');
+const UTF16LE = Buffer.from('\ufeffutf16 note\n', 'utf16le');
+
+test('list() marks notes that are not UTF-8 while keeping them listed', async () => {
+  const root = await makeVault({
+    'welcome.md': '# Welcome\n',
+    'latin1.md': LATIN1,
+    'notes/utf16.md': UTF16LE,
+  });
+  try {
+    const session = new VaultSession();
+    await session.open(root);
+
+    const files = await session.list();
+    const byPath = Object.fromEntries(files.map((file) => [file.path, file]));
+    assert.deepEqual(files.map((file) => file.path), ['latin1.md', 'notes/utf16.md', 'welcome.md']);
+    assert.equal(byPath['welcome.md'].utf8, true);
+    assert.equal(byPath['latin1.md'].utf8, false);
+    assert.equal(byPath['notes/utf16.md'].utf8, false);
+  } finally {
+    await remove(root);
+  }
+});
+
+test('read() and write() refuse a non-UTF-8 note and leave its bytes untouched', async () => {
+  const root = await makeVault({ 'latin1.md': LATIN1 });
+  try {
+    const session = new VaultSession();
+    await session.open(root);
+
+    for (const operation of [
+      () => session.read('latin1.md'),
+      () => session.write('latin1.md', 'café note\n'),
+      () => session.stat('latin1.md'),
+    ]) {
+      await assert.rejects(operation(), (error) => error.code === 'INVALID_ENCODING');
+    }
+
+    assert.deepEqual(await fs.readFile(path.join(root, 'latin1.md')), LATIN1);
+  } finally {
+    await remove(root);
+  }
+});

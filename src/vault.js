@@ -24,12 +24,17 @@
  *  - Reads return a `version` token (sha256 of the bytes); writes may require
  *    it, so a note changed by another program since the read is reported as a
  *    conflict instead of being silently overwritten.
+ *  - Notes that are not valid UTF-8 are refused (`INVALID_ENCODING`) instead of
+ *    being decoded lossily: `buffer.toString('utf8')` maps every invalid byte
+ *    to U+FFFD, and saving that text back would destroy the original bytes.
+ *    Such notes are still listed, flagged `utf8: false`, and never rewritten.
  */
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const { isUtf8 } = require('node:buffer');
 
 const DEFAULT_EXTENSIONS = Object.freeze(['.md', '.markdown', '.mdown', '.mkd']);
 
@@ -51,6 +56,14 @@ class VaultSecurityError extends VaultError {
   constructor(message, options = {}) {
     super(message, { ...options, code: 'SECURITY' });
     this.name = 'VaultSecurityError';
+  }
+}
+
+/** A note whose bytes are not valid UTF-8; decoding it would lose data. */
+class VaultEncodingError extends VaultError {
+  constructor(message, options = {}) {
+    super(message, { ...options, code: 'INVALID_ENCODING' });
+    this.name = 'VaultEncodingError';
   }
 }
 
@@ -76,6 +89,21 @@ class VaultConflictError extends VaultError {
 
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+/**
+ * Decode note bytes as UTF-8, or refuse. `Buffer#toString('utf8')` replaces
+ * every invalid sequence with U+FFFD, which is fine for display but fatal for
+ * a note that can be saved back, so this is checked first.
+ */
+function decodeUtf8(buffer, apiPath) {
+  if (!isUtf8(buffer)) {
+    throw new VaultEncodingError(
+      `Note is not valid UTF-8: ${apiPath} (its bytes would be rewritten)`,
+      { path: apiPath }
+    );
+  }
+  return buffer.toString('utf8');
 }
 
 function relativeEscape(root, candidate) {
@@ -223,8 +251,13 @@ class Vault {
   /**
    * List Markdown notes, sorted by relative path.
    *
+   * `utf8` is `false` when a note's bytes are not valid UTF-8 (the note is
+   * listed but cannot be opened or saved without rewriting its bytes) and
+   * `null` when the bytes could not be inspected. Detecting this costs one
+   * read per note; that is the price of never silently corrupting a file.
+   *
    * @param {{ recursive?: boolean, includeHidden?: boolean }} [options]
-   * @returns {Promise<Array<{relativePath: string, size: number, mtimeMs: number}>>}
+   * @returns {Promise<Array<{relativePath: string, size: number, mtimeMs: number, utf8: boolean|null}>>}
    */
   async listMarkdown(options = {}) {
     const recursive = options.recursive !== false;
@@ -263,7 +296,14 @@ class Vault {
           // lstat (not stat) so a file swapped for a symlink mid-walk is skipped.
           const stat = await fsp.lstat(absolute);
           if (stat.isFile() && !stat.isSymbolicLink()) {
-            entries.push({ relativePath: relPath, size: stat.size, mtimeMs: stat.mtimeMs });
+            let utf8 = null;
+            try {
+              utf8 = isUtf8(await readFileNoFollow(absolute, relPath));
+            } catch (readError) {
+              if (readError.code === 'ENOENT' || readError instanceof VaultSecurityError) continue;
+              // Unreadable but still listed: the encoding is simply unknown.
+            }
+            entries.push({ relativePath: relPath, size: stat.size, mtimeMs: stat.mtimeMs, utf8 });
           }
         } catch (err) {
           if (err.code !== 'ENOENT') throw err; // deleted mid-walk: skip it
@@ -291,7 +331,7 @@ class Vault {
     const { buffer, stat } = await this.#readExistingFile(target, apiPath);
     return {
       relativePath: apiPath,
-      content: buffer.toString('utf8'),
+      content: decodeUtf8(buffer, apiPath),
       version: sha256(buffer),
       size: buffer.length,
       mtimeMs: stat.mtimeMs
@@ -375,6 +415,15 @@ class Vault {
         path: apiPath,
         cause: err
       });
+    }
+
+    // Never re-encode a note whose current bytes are not UTF-8: the decoded
+    // text a caller holds cannot represent them, so any save would corrupt it.
+    if (existingStat && !isUtf8(existingBuffer)) {
+      throw new VaultEncodingError(
+        `Refusing to rewrite a note that is not valid UTF-8: ${apiPath}`,
+        { path: apiPath }
+      );
     }
 
     if (expectedVersion !== null) {
@@ -554,5 +603,6 @@ module.exports = {
   VaultError,
   VaultSecurityError,
   VaultConflictError,
+  VaultEncodingError,
   DEFAULT_EXTENSIONS
 };

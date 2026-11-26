@@ -252,6 +252,37 @@ button {
   color: var(--muted);
 }
 
+/* A note Pumice refused to decode: listed, labelled, but not openable. */
+.file-item.is-uneditable {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--muted);
+  cursor: default;
+}
+
+.file-item.is-uneditable:hover {
+  background: transparent;
+}
+
+.file-item.is-uneditable .file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-item .file-tag {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  opacity: 0.8;
+}
+
 .empty-note {
   margin: 0;
   padding: 10px;

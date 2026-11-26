@@ -21,6 +21,8 @@ const VAULT_CHANNELS = Object.freeze([
   'vault:stat',
 ]);
 
+const { VaultError } = require('../index.js');
+
 function toErrorPayload(error) {
   const payload = {
     code: typeof error?.code === 'string' ? error.code : 'VAULT_ERROR',
@@ -85,7 +87,27 @@ function registerVaultIpcHandlers({ ipcMain, session, chooseDirectory }) {
 
   ipcMain.handle('vault:write', async (_event, payload) => {
     try {
-      const { path: relPath, content, expectedVersion = null } = payload ?? {};
+      const { path: relPath, content, expectedVersion } = payload ?? {};
+      // A missing path or non-string content is reported before the envelope
+      // shape, so the caller sees the most specific problem first.
+      if (typeof relPath !== 'string' || relPath.trim() === '') {
+        throw new VaultError('Note path must be a non-empty string', { code: 'INVALID_PATH' });
+      }
+      if (typeof content !== 'string') {
+        throw new VaultError('Note content must be a string', {
+          code: 'INVALID_CONTENT',
+          path: relPath,
+        });
+      }
+      // The renderer's contract is explicit: a string means "only if the note
+      // still has this version", null means a deliberate unchecked overwrite.
+      // A missing field is a bug in the caller, never an implicit overwrite.
+      if (!('expectedVersion' in payload)) {
+        throw new VaultError(
+          'vault:write requires expectedVersion (pass null for an explicit unchecked overwrite)',
+          { code: 'INVALID_OPTIONS', path: relPath }
+        );
+      }
       const note = await session.write(relPath, content, { expectedVersion });
       return { ok: true, note };
     } catch (error) {

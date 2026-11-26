@@ -249,3 +249,58 @@ test('write payloads are validated instead of being trusted from the renderer', 
     await context.cleanup();
   }
 });
+
+// ---- encoding and the write contract --------------------------------------
+
+const LATIN1 = Buffer.from('café note\n', 'latin1');
+
+test('vault:read reports a non-UTF-8 note as INVALID_ENCODING, never as decoded text', async () => {
+  const context = await setup({ files: { 'latin1.md': LATIN1, 'welcome.md': '# Welcome\n' } });
+  try {
+    await context.ipcMain.invoke('vault:open');
+    const read = await context.ipcMain.invoke('vault:read', 'latin1.md');
+
+    assert.equal(read.ok, false);
+    assert.equal(read.error.code, 'INVALID_ENCODING');
+    assert.equal(read.error.path, 'latin1.md');
+    assert.equal('note' in read, false);
+    assert.deepEqual(await fs.readFile(path.join(context.root, 'latin1.md')), LATIN1);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('vault:list flags notes that are not UTF-8', async () => {
+  const context = await setup({ files: { 'latin1.md': LATIN1, 'welcome.md': '# Welcome\n' } });
+  try {
+    const opened = await context.ipcMain.invoke('vault:open');
+    const byPath = Object.fromEntries(opened.vault.files.map((file) => [file.path, file]));
+    assert.equal(byPath['welcome.md'].utf8, true);
+    assert.equal(byPath['latin1.md'].utf8, false);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test('vault:write refuses a payload without expectedVersion instead of overwriting unchecked', async () => {
+  const context = await setup();
+  try {
+    await context.ipcMain.invoke('vault:open');
+    await fs.writeFile(path.join(context.root, 'welcome.md'), 'external edit\n');
+
+    const written = await context.ipcMain.invoke('vault:write', {
+      path: 'welcome.md',
+      content: 'my version\n',
+    });
+
+    assert.equal(written.ok, false);
+    assert.equal(written.error.code, 'INVALID_OPTIONS');
+    assert.match(written.error.message, /expectedVersion/);
+    assert.equal(
+      await fs.readFile(path.join(context.root, 'welcome.md'), 'utf8'),
+      'external edit\n',
+    );
+  } finally {
+    await context.cleanup();
+  }
+});

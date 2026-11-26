@@ -43,6 +43,7 @@ export function createShellView({ document, onOpenVault = () => {} } = {}) {
     fileItems: requireElement(document, 'file-items'),
     documentTitle: requireElement(document, 'document-title'),
     statusText: requireElement(document, 'status-text'),
+    statusMeta: requireElement(document, 'status-meta'),
   };
 
   let destroyed = false;
@@ -56,6 +57,15 @@ export function createShellView({ document, onOpenVault = () => {} } = {}) {
     const text = asNonEmptyString(message) ?? 'Ready';
     elements.statusText.textContent = text;
     elements.statusText.dataset.state = state;
+  }
+
+  /**
+   * Describe what is in the editor. The label must follow the note that is
+   * actually open: a hard-coded "UTF-8" would misdescribe a note that Pumice
+   * refused to decode.
+   */
+  function setStatusMeta(message) {
+    elements.statusMeta.textContent = asNonEmptyString(message) ?? 'Markdown';
   }
 
   function clearFiles() {
@@ -82,8 +92,24 @@ export function createShellView({ document, onOpenVault = () => {} } = {}) {
       const name = document.createElement('span');
       name.className = 'file-name';
       name.textContent = fileNameFor(file);
-
       item.append(name);
+
+      // A note Pumice refused to decode is listed honestly: visible, but
+      // marked as not editable instead of being opened and re-encoded.
+      if (file?.utf8 === false) {
+        item.classList.add('is-uneditable');
+        item.dataset.utf8 = 'false';
+        item.setAttribute('aria-disabled', 'true');
+        item.title = 'This note is not UTF-8; Pumice will not rewrite its bytes.';
+
+        const tag = document.createElement('span');
+        tag.className = 'file-tag';
+        tag.textContent = 'not UTF-8';
+        item.append(tag);
+      } else {
+        item.dataset.utf8 = file?.utf8 === true ? 'true' : 'unknown';
+      }
+
       fragment.append(item);
     }
     elements.fileItems.append(fragment);
@@ -99,6 +125,7 @@ export function createShellView({ document, onOpenVault = () => {} } = {}) {
       elements.fileListEmpty.textContent = DEFAULT_EMPTY_LIST_NOTE;
       elements.fileListEmpty.hidden = false;
       clearFiles();
+      setStatusMeta('Markdown');
       setStatus('Ready');
       return;
     }
@@ -136,5 +163,5 @@ export function createShellView({ document, onOpenVault = () => {} } = {}) {
     elements.openButton.removeEventListener('click', handleOpen);
   }
 
-  return { destroy, getState, handleMenuAction, setStatus, setVault };
+  return { destroy, getState, handleMenuAction, setStatus, setStatusMeta, setVault };
 }

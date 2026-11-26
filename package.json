@@ -11,7 +11,8 @@
     "test:shell": "node --test --test-reporter=spec test/*.test.mjs",
     "test:vault": "node --test test/*.test.js",
     "smoke": "electron . --smoke-test",
-    "smoke:headless": "bash scripts/smoke-headless.sh"
+    "smoke:headless": "bash scripts/smoke-headless.sh",
+    "e2e:data-safety": "bash scripts/e2e-data-safety.sh"
   },
   "engines": {
     "node": ">=24.15.0"
