@@ -1,0 +1,21 @@
+{
+  "name": "pumice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A lightweight desktop shell for plain-Markdown vaults",
+  "main": "src/main/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-reporter=spec test/*.test.mjs",
+    "smoke": "electron . --smoke-test",
+    "smoke:headless": "bash scripts/smoke-headless.sh"
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "devDependencies": {
+    "electron": "^45.5.0",
+    "jsdom": "^31.0.1"
+  }
+}

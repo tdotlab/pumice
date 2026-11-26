@@ -1,0 +1,352 @@
+:root {
+  color-scheme: light;
+  --stone-0: #fbfaf7;
+  --stone-1: #f6f4ef;
+  --stone-2: #ece7de;
+  --stone-3: #ded7ca;
+  --line: #d8d1c4;
+  --ink: #26231e;
+  --ink-soft: #4a453d;
+  --muted: #7a7367;
+  --accent: #4c4336;
+  --accent-strong: #393126;
+  --focus: #8a6f4d;
+  --warning: #8a5a00;
+  --error: #a0322a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--stone-1);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100vh;
+  min-height: 0;
+}
+
+/* Top bar ---------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 56px;
+  padding: 0 20px;
+  background: var(--stone-0);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--stone-0);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.brand-copy {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.brand-name {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.brand-tagline {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.app-version {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Workspace -------------------------------------------------------------- */
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--stone-2);
+  border-right: 1px solid var(--line);
+}
+
+.sidebar-header {
+  padding: 20px 16px 14px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.vault-title {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.button-primary {
+  background: var(--accent);
+  color: var(--stone-0);
+}
+
+.button-primary::before {
+  content: "+";
+  font-size: 15px;
+  line-height: 1;
+}
+
+.button-primary:hover {
+  background: var(--accent-strong);
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.file-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px 12px;
+}
+
+.file-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.file-item {
+  padding: 7px 10px;
+  border-radius: 7px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.file-item:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.file-item[data-path=""] {
+  color: var(--muted);
+}
+
+.empty-note {
+  margin: 0;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.sidebar-footnote {
+  margin: 0;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* Editor ----------------------------------------------------------------- */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--stone-1);
+}
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 48px;
+  flex: none;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(251, 250, 247, 0.6);
+}
+
+.document-title {
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-hint,
+.status-meta {
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.editor-body {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 40px 32px;
+}
+
+.empty-state {
+  width: min(100%, 460px);
+}
+
+.empty-kicker {
+  display: inline-block;
+  margin-bottom: 10px;
+  color: var(--focus);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.empty-state h2 {
+  margin: 0 0 12px;
+  font-size: 27px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+.empty-state p {
+  margin: 0 0 10px;
+  color: var(--ink-soft);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.empty-state .empty-detail {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* Status bar ------------------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 30px;
+  padding: 0 16px;
+  background: var(--stone-2);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-text[data-state="warning"] {
+  color: var(--warning);
+}
+
+.status-text[data-state="error"] {
+  color: var(--error);
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  }
+
+  .empty-state h2 {
+    font-size: 23px;
+  }
+}
