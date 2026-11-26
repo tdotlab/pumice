@@ -2,24 +2,14 @@
   "name": "pumice",
   "version": "0.1.0",
   "private": true,
-  "description": "A lightweight desktop notes application for plain-Markdown vaults",
-  "main": "src/main/main.js",
-  "type": "commonjs",
+  "description": "A desktop Markdown vault editor with a Rust core and TypeScript frontend",
   "scripts": {
-    "start": "electron .",
-    "test": "node --test --test-reporter=spec test/*.test.mjs test/*.test.js",
-    "test:shell": "node --test --test-reporter=spec test/*.test.mjs",
-    "test:vault": "node --test test/*.test.js",
-    "smoke": "electron . --smoke-test",
-    "smoke:headless": "bash scripts/smoke-headless.sh",
-    "e2e:data-safety": "bash scripts/e2e-data-safety.sh"
-  },
-  "engines": {
-    "node": ">=24.15.0"
-  },
-  "devDependencies": {
-    "electron": "^45.5.0",
-    "jsdom": "^31.0.1"
+    "setup": "npm --prefix frontend ci",
+    "build:frontend": "npm --prefix frontend run build",
+    "test:frontend": "npm --prefix frontend test",
+    "test:core": "cargo test --locked --manifest-path crates/pumice-core/Cargo.toml",
+    "test": "npm run test:frontend && npm run test:core",
+    "start": "npm run build:frontend && cargo run --locked --manifest-path src-tauri/Cargo.toml --features custom-protocol"
   },
   "license": "UNLICENSED"
 }

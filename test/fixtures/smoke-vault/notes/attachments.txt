@@ -1,1 +1,0 @@
-Not a Markdown note. The vault only lists .md/.markdown/.mdown/.mkd files.

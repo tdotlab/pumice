@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pumice</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" data-testid="app-shell">
+      <header class="topbar" role="banner">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span class="brand-copy">
+            <span class="brand-name">Pumice</span>
+            <span class="brand-tagline">Plain Markdown vaults</span>
+          </span>
+        </div>
+        <span class="app-version" data-testid="app-version"></span>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar" data-testid="sidebar" aria-label="Vault">
+          <div class="sidebar-header">
+            <p class="eyebrow">Vault</p>
+            <h1 class="vault-title" data-testid="vault-title">No vault open</h1>
+            <button class="button button-primary" type="button" data-testid="open-vault-button">
+              Open vault…
+            </button>
+          </div>
+
+          <nav class="file-list" data-testid="file-list" aria-label="Vault files" hidden>
+            <p class="empty-note" data-testid="file-list-empty">
+              Open a vault to see its Markdown files.
+            </p>
+            <ul class="file-items" data-testid="file-items"></ul>
+          </nav>
+
+          <p class="sidebar-footnote">Local files only. Nothing leaves this machine.</p>
+        </aside>
+
+        <main class="editor" data-testid="editor" aria-label="Editor">
+          <div class="editor-toolbar">
+            <div class="document-heading">
+              <span class="document-title" data-testid="document-title">Nothing open</span>
+              <span class="document-hint">Markdown</span>
+            </div>
+            <div class="editor-actions">
+              <span class="note-dirty" data-testid="note-dirty" hidden>Unsaved</span>
+              <button class="button button-quiet" type="button" data-testid="reload-note-button" disabled>
+                Reload
+              </button>
+              <button class="button button-primary" type="button" data-testid="save-note-button" disabled>
+                Save
+              </button>
+            </div>
+          </div>
+
+          <section class="editor-body" aria-label="Note content">
+            <div class="editor-banner" data-testid="editor-banner" role="status" hidden>
+              <p class="editor-banner-text" data-testid="editor-banner-text"></p>
+              <div class="editor-banner-actions">
+                <button class="button button-quiet" type="button" data-testid="banner-reload-button">
+                  Reload from disk
+                </button>
+                <button class="button button-warning" type="button" data-testid="banner-overwrite-button" hidden>
+                  Overwrite with my version
+                </button>
+              </div>
+            </div>
+
+            <div class="empty-state" data-testid="editor-empty">
+              <span class="empty-kicker">Pumice</span>
+              <h2>Your notes, still yours.</h2>
+              <p>
+                Open a vault, pick a Markdown note and edit it here. Saves are atomic:
+                a failure leaves the previous version on disk.
+              </p>
+              <p class="empty-detail">
+                If another program changes the note, Pumice refuses to overwrite it
+                and asks you what to do.
+              </p>
+            </div>
+
+            <textarea
+              class="note-editor"
+              data-testid="note-editor"
+              aria-label="Note content"
+              spellcheck="true"
+              wrap="soft"
+              hidden
+            ></textarea>
+          </section>
+        </main>
+      </div>
+
+      <footer
+        class="statusbar"
+        role="contentinfo"
+        data-testid="statusbar"
+        aria-live="polite"
+      >
+        <span class="status-text" data-testid="status-text" data-state="ready">Ready</span>
+        <span class="status-meta" data-testid="status-meta">Markdown</span>
+      </footer>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

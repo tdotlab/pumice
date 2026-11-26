@@ -1,0 +1,623 @@
+/**
+ * Renderer controller for the first Pumice editing workflow.
+ *
+ * Responsibilities:
+ *  - ask the main process to open a vault, then render its Markdown files
+ *  - load a note into the textarea and mark it dirty while the text differs
+ *  - save through the vault API with the version the note was read at
+ *  - put the note's own line endings back on save: the textarea can only hold
+ *    LF, so CRLF / lone-CR / mixed notes would otherwise be rewritten as LF
+ *  - never clobber a note another program changed: a save conflict keeps the
+ *    draft in the editor and offers an explicit reload or overwrite
+ *  - notice external edits when the window regains focus
+ *
+ * All filesystem work stays in the main process. This module only talks to
+ * `window.pumice` (injected here as `api`) and to the shell view.
+ */
+
+const EMPTY_TITLE = 'Nothing open';
+const DIRTY_LABEL = 'Unsaved changes';
+const STATUS_META_UTF8 = 'Markdown · UTF-8';
+const STATUS_META_NOT_UTF8 = 'Markdown · not UTF-8';
+
+/**
+ * Line endings a note may use. A textarea can only hold LF: the HTML value
+ * sanitiser turns CRLF and lone CR into LF on assignment, so the editor text
+ * alone cannot say how the note ended its lines.
+ */
+function normalizeEol(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * Note the endings a note actually used, so a save can put them back. A file
+ * with one kind of break keeps that kind; a mixed file remembers each break
+ * in order plus its most common ending for lines typed afterwards.
+ */
+function analyzeEol(text) {
+  const breaks = text.match(/\r\n|\r|\n/g) ?? [];
+  const kinds = new Set(
+    breaks.map((breakText) => (breakText === '\r\n' ? 'crlf' : breakText === '\r' ? 'cr' : 'lf')),
+  );
+  const counts = new Map();
+  for (const breakText of breaks) counts.set(breakText, (counts.get(breakText) ?? 0) + 1);
+  // Lines typed after the note was read get its most common ending; on a tie
+  // the more conventional ending wins (CRLF, then LF, then CR).
+  let commonCount = 0;
+  for (const count of counts.values()) if (count > commonCount) commonCount = count;
+  const common =
+    ['\r\n', '\n', '\r'].find((breakText) => counts.get(breakText) === commonCount) ?? '\n';
+  return {
+    style: kinds.size === 0 ? 'none' : kinds.size === 1 ? [...kinds][0] : 'mixed',
+    breaks,
+    common,
+  };
+}
+
+/**
+ * Reapply a note's own line endings to LF text from the editor: a uniform
+ * style converts every break, a mixed note keeps each original line's ending
+ * and gives later lines the note's most common ending.
+ */
+function restoreEol(text, eol) {
+  if (!eol || eol.style === 'none' || eol.style === 'lf') return text;
+  if (eol.style === 'crlf') return text.replace(/\n/g, '\r\n');
+  if (eol.style === 'cr') return text.replace(/\n/g, '\r');
+  const parts = text.split('\n');
+  let restored = parts[0];
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    restored += (eol.breaks[index] ?? eol.common) + parts[index + 1];
+  }
+  return restored;
+}
+
+/**
+ * A note whose bytes are not valid UTF-8 is never loaded into the editor:
+ * decoding it with `toString('utf8')` replaces every invalid byte with U+FFFD,
+ * and saving that text back would destroy the original file.
+ */
+function notUtf8Message(notePath) {
+  return (
+    `“${notePath}” is not UTF-8. Editing it here would rewrite its bytes, so ` +
+    'Pumice leaves the file untouched. Convert it to UTF-8 in another editor to work on it.'
+  );
+}
+
+function requireElement(document: Document, testId: string): any {
+  const element = document.querySelector(`[data-testid="${testId}"]`);
+  if (!element) throw new Error(`shell markup is missing [data-testid="${testId}"]`);
+  return element;
+}
+
+export function createVaultController({ document, api, view, confirm = () => false, onDirtyChange = (_dirty: boolean) => {} }: { document?: Document; api?: import('./bridge').VaultBridge; view?: ReturnType<typeof import('./ui').createShellView>; confirm?: (message: string, options?: { title: string; acceptLabel: string }) => boolean | Promise<boolean>; onDirtyChange?: (dirty: boolean) => void } = {}) {
+  if (!document) throw new TypeError('document is required');
+  if (!view || typeof view.setVault !== 'function' || typeof view.setStatus !== 'function') {
+    throw new TypeError('view must be the shell view');
+  }
+  if (!api || typeof api.openVault !== 'function' || typeof api.writeNote !== 'function') {
+    throw new TypeError('api must expose the vault bridge');
+  }
+  if (typeof confirm !== 'function') throw new TypeError('confirm must be a function');
+
+  const elements = {
+    fileItems: requireElement(document, 'file-items'),
+    textarea: requireElement(document, 'note-editor'),
+    editorEmpty: requireElement(document, 'editor-empty'),
+    documentTitle: requireElement(document, 'document-title'),
+    saveButton: requireElement(document, 'save-note-button'),
+    reloadButton: requireElement(document, 'reload-note-button'),
+    dirtyBadge: requireElement(document, 'note-dirty'),
+    banner: requireElement(document, 'editor-banner'),
+    bannerText: requireElement(document, 'editor-banner-text'),
+    bannerReload: requireElement(document, 'banner-reload-button'),
+    bannerOverwrite: requireElement(document, 'banner-overwrite-button'),
+  };
+
+  const state = {
+    vault: null,
+    note: null,
+    dirty: false,
+    saving: false,
+    externalChange: false,
+  };
+  let destroyed = false;
+  let openingVault = false;
+  let confirming = false;
+  let readSequence = 0;
+
+  // ---- presentation helpers -------------------------------------------------
+
+  function setStatus(message, statusState = 'ready') {
+    if (!destroyed) view.setStatus(message, statusState);
+  }
+
+  function setStatusMeta(message) {
+    if (destroyed) return;
+    if (typeof view.setStatusMeta === 'function') view.setStatusMeta(message);
+  }
+
+  /** The listing entry for a note, when the row came from a vault listing. */
+  function listedFile(notePath) {
+    const files = state.vault && Array.isArray(state.vault.files) ? state.vault.files : [];
+    return files.find((file) => file && file.path === notePath) ?? null;
+  }
+
+  function showBanner(message, { reload = false, overwrite = false } = {}) {
+    elements.bannerText.textContent = message;
+    elements.bannerReload.hidden = !reload;
+    elements.bannerOverwrite.hidden = !overwrite;
+    elements.banner.hidden = false;
+  }
+
+  function hideBanner() {
+    elements.banner.hidden = true;
+    elements.bannerText.textContent = '';
+    elements.bannerReload.hidden = false;
+    elements.bannerOverwrite.hidden = true;
+  }
+
+  function updateButtons() {
+    elements.saveButton.disabled = !(state.note && state.dirty) || state.saving;
+    elements.reloadButton.disabled = !state.note || state.saving;
+  }
+
+  function setDirty(dirty, { updateStatus = true } = {}) {
+    state.dirty = dirty;
+    onDirtyChange(state.dirty || state.saving);
+    elements.dirtyBadge.hidden = !dirty;
+    elements.dirtyBadge.textContent = DIRTY_LABEL;
+    updateButtons();
+    if (updateStatus && state.note) {
+      if (dirty) setStatus('Unsaved changes', 'warning');
+      else setStatus(`Editing ${state.note.path}`, 'ready');
+    }
+  }
+
+  function markActive(relPath) {
+    for (const item of elements.fileItems.querySelectorAll('li.file-item')) {
+      const active = item.dataset.path === relPath;
+      item.classList.toggle('is-active', active);
+      if (active) item.setAttribute('aria-current', 'true');
+      else item.removeAttribute('aria-current');
+    }
+  }
+
+  function resetEditor() {
+    state.note = null;
+    state.externalChange = false;
+    elements.textarea.value = '';
+    elements.textarea.hidden = true;
+    elements.editorEmpty.hidden = false;
+    elements.documentTitle.textContent = EMPTY_TITLE;
+    setStatusMeta('Markdown');
+    hideBanner();
+    markActive(null);
+    setDirty(false, { updateStatus: false });
+    updateButtons();
+  }
+
+  function applyNote(note) {
+    const content = typeof note.content === 'string' ? note.content : '';
+    state.note = {
+      path: note.path,
+      name: note.name ?? note.path,
+      content,
+      normalized: normalizeEol(content),
+      eol: analyzeEol(content),
+      version: note.version,
+      size: note.size,
+      mtimeMs: note.mtimeMs,
+    };
+    state.externalChange = false;
+    elements.textarea.value = state.note.normalized;
+    elements.textarea.hidden = false;
+    elements.editorEmpty.hidden = true;
+    elements.documentTitle.textContent = note.path;
+    setStatusMeta(STATUS_META_UTF8);
+    hideBanner();
+    markActive(note.path);
+    setDirty(false, { updateStatus: false });
+    updateButtons();
+  }
+
+  function errorMessage(result, fallback) {
+    return result?.error?.message ?? result?.error?.code ?? fallback;
+  }
+
+  async function callApi(fn, ...args) {
+    try {
+      return await fn(...args);
+    } catch (error) {
+      return { ok: false, error: { code: 'BRIDGE_ERROR', message: (error instanceof Error ? error.message : String(error)) } };
+    }
+  }
+
+  async function confirmAction(message, options) {
+    if (confirming) return false;
+    confirming = true;
+    const note = state.note;
+    const text = elements.textarea.value;
+    try {
+      const accepted = await confirm(message, options);
+      return accepted === true && !destroyed && state.note === note && elements.textarea.value === text && !state.saving && !openingVault;
+    } catch {
+      return false;
+    } finally {
+      confirming = false;
+    }
+  }
+
+  function confirmDiscardIfDirty() {
+    return confirmAction('Discard the unsaved changes in the current note?', {
+      title: 'Discard unsaved changes?', acceptLabel: 'Discard changes',
+    });
+  }
+
+  // ---- the workflow ---------------------------------------------------------
+
+  async function openVault() {
+    if (state.saving || openingVault || confirming) return { ok: false, ignored: true };
+    if (state.dirty && !(await confirmDiscardIfDirty())) {
+      setStatus('Save or discard the current note before opening another vault.', 'warning');
+      return { ok: false, canceled: true };
+    }
+
+    openingVault = true;
+    readSequence += 1;
+    elements.textarea.readOnly = true;
+    const result = await callApi(api.openVault);
+    elements.textarea.readOnly = false;
+    openingVault = false;
+    if (!result?.ok) {
+      if (result?.canceled) return result;
+      showBanner(`Could not open the vault: ${errorMessage(result, 'unknown error')}`, {});
+      setStatus(`Could not open vault: ${errorMessage(result, 'unknown error')}`, 'error');
+      return result;
+    }
+
+    state.vault = result.vault;
+    view.setVault({
+      name: result.vault.name,
+      files: Array.isArray(result.vault.files) ? result.vault.files : [],
+    });
+    resetEditor();
+
+    const count = Array.isArray(result.vault.files) ? result.vault.files.length : 0;
+    const noun = count === 1 ? 'note' : 'notes';
+    setStatus(`Opened ${result.vault.name} · ${count} ${noun}`, 'ready');
+    return result;
+  }
+
+  async function loadNoteFromDisk(notePath, { quiet = false } = {}) {
+    const sequence = ++readSequence;
+    const originalNote = state.note;
+    const originalText = elements.textarea.value;
+    const result = await callApi(api.readNote, notePath);
+    if (sequence !== readSequence || state.note !== originalNote || elements.textarea.value !== originalText || openingVault) {
+      setStatus('Note switch cancelled — edits kept.', 'warning');
+      return { ok: false, canceled: true };
+    }
+    if (!result?.ok) {
+      if (result?.error?.code === 'INVALID_ENCODING') {
+        refuseNotUtf8(notePath);
+        return result;
+      }
+      showBanner(`Could not open ${notePath}: ${errorMessage(result, 'unknown error')}`, {});
+      setStatus('Could not open note', 'error');
+      return result;
+    }
+    applyNote(result.note);
+    if (!quiet) setStatus(`Editing ${notePath}`, 'ready');
+    return result;
+  }
+
+  /**
+   * Explain that the note was not opened, and leave every byte on disk alone.
+   * The status bar stops claiming UTF-8 for a note Pumice refused to decode.
+   */
+  function refuseNotUtf8(notePath) {
+    showBanner(notUtf8Message(notePath), {});
+    setStatus(`Not opened — “${notePath}” is not UTF-8`, 'warning');
+    if (!state.note) setStatusMeta(STATUS_META_NOT_UTF8);
+  }
+
+  async function openNote(notePath) {
+    if (state.saving || openingVault || confirming) return { ok: false, ignored: true };
+    if (destroyed) return;
+    if (typeof notePath !== 'string' || notePath.trim() === '') return;
+    if (state.note && state.note.path === notePath) return;
+
+    const listed = listedFile(notePath);
+    if (listed && listed.utf8 === false) {
+      refuseNotUtf8(notePath);
+      return { ok: false, error: { code: 'INVALID_ENCODING', message: notUtf8Message(notePath) } };
+    }
+
+    if (state.dirty && !(await confirmDiscardIfDirty())) {
+      setStatus('Save or discard the current note before switching notes.', 'warning');
+      return { ok: false, canceled: true };
+    }
+    return loadNoteFromDisk(notePath);
+  }
+
+  async function save({ force = false } = {}) {
+    if (destroyed || !state.note || state.saving || openingVault || confirming) return { ok: false, ignored: true };
+
+    const { path: notePath, version } = state.note;
+    const editorText = normalizeEol(elements.textarea.value);
+    // The textarea can only change line endings; put the note's own endings
+    // back, and never rewrite a note whose text the user did not change.
+    const content =
+      editorText === state.note.normalized
+        ? state.note.content
+        : restoreEol(editorText, state.note.eol);
+    const expectedVersion = force ? null : version;
+
+    state.saving = true;
+    onDirtyChange(true);
+    updateButtons();
+
+    const result = await callApi(api.writeNote, notePath, content, expectedVersion);
+    state.saving = false;
+
+    if (result?.ok) {
+      const saved = result.note ?? {};
+      state.note = {
+        ...state.note,
+        ...saved,
+        path: saved.path ?? notePath,
+        content,
+        normalized: normalizeEol(content),
+        eol: analyzeEol(content),
+      };
+      state.externalChange = false;
+      hideBanner();
+      // Text typed while the save was in flight must stay dirty.
+      const stillDirty = normalizeEol(elements.textarea.value) !== state.note.normalized;
+      setDirty(stillDirty, { updateStatus: false });
+      setStatus(
+        stillDirty ? `Saved ${notePath} — newer edits not yet saved` : `Saved ${notePath}`,
+        stillDirty ? 'warning' : 'ready',
+      );
+      updateButtons();
+      return result;
+    }
+
+    setDirty(normalizeEol(elements.textarea.value) !== state.note.normalized, { updateStatus: false });
+    const error = result?.error ?? {};
+    if (error.code === 'CONFLICT') {
+      state.externalChange = true;
+      const why = error.reason === 'deleted' ? 'was deleted on disk' : 'changed on disk';
+      showBanner(
+        `“${notePath}” ${why} since you opened it. Nothing was overwritten. ` +
+          'Reload the note from disk, or overwrite it with the version in this editor.',
+        { reload: true, overwrite: true },
+      );
+      setStatus('Note changed on disk — not saved', 'warning');
+    } else if (error.code === 'INVALID_ENCODING') {
+      // The note stopped being UTF-8 (or was never editable) after it was read.
+      showBanner(
+        `“${notePath}” is not UTF-8 on disk. Pumice will not rewrite its bytes, ` +
+          'so the save was refused. Your edits are still in the editor.',
+        {},
+      );
+      setStatus('Save refused — note is not UTF-8', 'warning');
+    } else {
+      showBanner(
+        `Could not save ${notePath}: ${errorMessage(result, 'unknown error')}. ` +
+          'Your edits are still in the editor.',
+        {},
+      );
+      setStatus('Save failed — edits kept', 'error');
+    }
+    updateButtons();
+    return result;
+  }
+
+  async function overwrite() {
+    if (!state.note || destroyed) return { ok: false, ignored: true };
+    if (state.saving || openingVault || confirming) return { ok: false, ignored: true };
+    const confirmed = await confirmAction(
+      `Overwrite “${state.note.path}” on disk with the text in this editor?`,
+      { title: 'Overwrite note on disk?', acceptLabel: 'Overwrite' },
+    );
+    if (!confirmed) return { ok: false, canceled: true };
+    return save({ force: true });
+  }
+
+  async function reload({ quiet = false } = {}) {
+    if (state.saving || openingVault || confirming) return { ok: false, ignored: true };
+    if (!state.note || destroyed) return { ok: false, ignored: true };
+    if (!quiet && state.dirty && !(await confirmDiscardIfDirty())) {
+      setStatus('Reload cancelled — edits kept.', 'warning');
+      return { ok: false, canceled: true };
+    }
+
+    const notePath = state.note.path;
+    const initialNote = state.note;
+    const initialText = elements.textarea.value;
+    const result = await callApi(api.readNote, notePath);
+    if (state.note !== initialNote) return { ok: false, ignored: true };
+    if (elements.textarea.value !== initialText) {
+      state.externalChange = true;
+      showBanner(`“${notePath}” changed on disk while you were editing. Reload or overwrite explicitly.`, { reload: true, overwrite: true });
+      setStatus('Note changed on disk — unsaved edits kept', 'warning');
+      return { ok: false, canceled: true };
+    }
+    if (!result?.ok) {
+      if (result?.error?.code === 'ENOENT') {
+        state.externalChange = true;
+        showBanner(
+          `“${notePath}” was deleted on disk. Your copy is still in the editor; ` +
+            'use Overwrite to recreate it, or keep a copy elsewhere.',
+          { reload: false, overwrite: true },
+        );
+        setStatus('Note deleted on disk — edits kept', 'warning');
+      } else {
+        showBanner(`Could not reload ${notePath}: ${errorMessage(result, 'unknown error')}.`, {});
+        setStatus('Reload failed', 'error');
+      }
+      return result;
+    }
+
+    applyNote(result.note);
+    setStatus(quiet ? 'Reloaded after external change' : `Reloaded ${notePath}`, quiet ? 'warning' : 'ready');
+    return result;
+  }
+
+  async function checkForExternalChange() {
+    if (destroyed || !state.note || state.saving || openingVault) return;
+    const initialNote = state.note;
+    const notePath = initialNote.path;
+    const result = await callApi(api.statNote, notePath);
+    if (state.note !== initialNote || state.saving) return;
+    if (!result?.ok) {
+      // stat() reads the bytes to hash them, so a note that stopped being
+      // UTF-8 raises INVALID_ENCODING instead of reporting a version. That is
+      // an external change too: say so, and keep the draft.
+      if (result?.error?.code === 'INVALID_ENCODING' && !state.externalChange) {
+        state.externalChange = true;
+        showBanner(
+          `“${notePath}” is not UTF-8 on disk any more (it changed outside Pumice). ` +
+            'Pumice will not rewrite its bytes, so the save is refused. Your edits are still in the editor.',
+          {},
+        );
+        setStatus('Note changed on disk — now not UTF-8', 'warning');
+      }
+      return;
+    }
+
+    if (result.note === null) {
+      if (!state.externalChange) {
+        state.externalChange = true;
+        showBanner(
+          `“${notePath}” was deleted on disk. Your copy is still in the editor.`,
+          { reload: false, overwrite: true },
+        );
+        setStatus('Note deleted on disk', 'warning');
+      }
+      return;
+    }
+
+    if (result.note.version === state.note.version) return;
+
+    if (state.dirty) {
+      state.externalChange = true;
+      showBanner(
+        `“${notePath}” changed on disk while you were editing. Saving will not ` +
+          'overwrite it; reload to take the disk version, or overwrite explicitly.',
+        { reload: true, overwrite: true },
+      );
+      setStatus('Note changed on disk — unsaved edits kept', 'warning');
+      return;
+    }
+
+    // Nothing to lose: quietly take the version on disk.
+    await reload({ quiet: true });
+  }
+
+  // ---- wiring ---------------------------------------------------------------
+
+  /**
+   * Dirty-close guard, renderer half. Cancelling `beforeunload` is what makes
+   * Electron emit `will-prevent-unload` on the window; the main process
+   * (src/main/close-guard.js) then asks the user before discarding the draft.
+   */
+  const hostWindow = document.defaultView;
+  function handleBeforeUnload(event) {
+    if (!state.dirty) return undefined;
+    event.preventDefault();
+    event.returnValue = 'Unsaved changes in Pumice';
+    return event.returnValue;
+  }
+
+  if (hostWindow && typeof hostWindow.addEventListener === 'function') {
+    hostWindow.addEventListener('beforeunload', handleBeforeUnload);
+  }
+
+  function handleInput() {
+    if (destroyed || !state.note || state.saving || openingVault) return;
+    setDirty(normalizeEol(elements.textarea.value) !== state.note.normalized);
+  }
+
+  function handleFileClick(event) {
+    const item = event.target?.closest?.('li.file-item');
+    if (!item || !elements.fileItems.contains(item)) return;
+    openNote(item.dataset.path);
+  }
+
+  function handleFileKeydown(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const item = event.target?.closest?.('li.file-item');
+    if (!item) return;
+    event.preventDefault();
+    openNote(item.dataset.path);
+  }
+
+  function handleSaveClick() {
+    save();
+  }
+
+  function handleReloadClick() {
+    reload();
+  }
+
+  function handleOverwriteClick() {
+    overwrite();
+  }
+
+  function handleShortcut(event) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    if (key !== 's' || !state.note) return;
+    event.preventDefault();
+    save();
+  }
+
+  elements.fileItems.addEventListener('click', handleFileClick);
+  elements.fileItems.addEventListener('keydown', handleFileKeydown);
+  elements.textarea.addEventListener('input', handleInput);
+  elements.saveButton.addEventListener('click', handleSaveClick);
+  elements.reloadButton.addEventListener('click', handleReloadClick);
+  elements.bannerReload.addEventListener('click', handleReloadClick);
+  elements.bannerOverwrite.addEventListener('click', handleOverwriteClick);
+  document.addEventListener('keydown', handleShortcut);
+
+  function destroy() {
+    destroyed = true;
+    elements.fileItems.removeEventListener('click', handleFileClick);
+    elements.fileItems.removeEventListener('keydown', handleFileKeydown);
+    elements.textarea.removeEventListener('input', handleInput);
+    elements.saveButton.removeEventListener('click', handleSaveClick);
+    elements.reloadButton.removeEventListener('click', handleReloadClick);
+    elements.bannerReload.removeEventListener('click', handleReloadClick);
+    elements.bannerOverwrite.removeEventListener('click', handleOverwriteClick);
+    document.removeEventListener('keydown', handleShortcut);
+    if (hostWindow && typeof hostWindow.removeEventListener === 'function') {
+      hostWindow.removeEventListener('beforeunload', handleBeforeUnload);
+    }
+  }
+
+  function getState() {
+    return {
+      vault: state.vault ? state.vault.name : null,
+      note: state.note ? state.note.path : null,
+      version: state.note ? state.note.version : null,
+      dirty: state.dirty,
+      saving: state.saving,
+      externalChange: state.externalChange,
+      bannerVisible: !elements.banner.hidden,
+    };
+  }
+
+  return {
+    checkForExternalChange,
+    destroy,
+    getState,
+    openNote,
+    openVault,
+    overwrite,
+    reload,
+    save,
+  };
+}
