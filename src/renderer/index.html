@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    />
+    <title>Pumice</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell" data-testid="app-shell">
+      <header class="topbar" role="banner">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span class="brand-copy">
+            <span class="brand-name">Pumice</span>
+            <span class="brand-tagline">Plain Markdown vaults</span>
+          </span>
+        </div>
+        <span class="app-version" data-testid="app-version"></span>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar" data-testid="sidebar" aria-label="Vault">
+          <div class="sidebar-header">
+            <p class="eyebrow">Vault</p>
+            <h1 class="vault-title" data-testid="vault-title">No vault open</h1>
+            <button class="button button-primary" type="button" data-testid="open-vault-button">
+              Open vault…
+            </button>
+          </div>
+
+          <nav class="file-list" data-testid="file-list" aria-label="Vault files" hidden>
+            <p class="empty-note" data-testid="file-list-empty">
+              Open a vault to see its Markdown files.
+            </p>
+            <ul class="file-items" data-testid="file-items"></ul>
+          </nav>
+
+          <p class="sidebar-footnote">Local files only. Nothing leaves this machine.</p>
+        </aside>
+
+        <main class="editor" data-testid="editor" aria-label="Editor">
+          <div class="editor-toolbar">
+            <span class="document-title" data-testid="document-title">Nothing open</span>
+            <span class="document-hint">Markdown</span>
+          </div>
+
+          <section class="editor-body" aria-label="Note content">
+            <div class="empty-state" data-testid="editor-empty">
+              <span class="empty-kicker">Pumice</span>
+              <h2>Your notes, still yours.</h2>
+              <p>
+                Open a vault to browse its Markdown files. Editing and saving arrive
+                with the vault module.
+              </p>
+              <p class="empty-detail">
+                Pumice works on a folder of plain text files — no database, no lock-in.
+              </p>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <footer
+        class="statusbar"
+        role="contentinfo"
+        data-testid="statusbar"
+        aria-live="polite"
+      >
+        <span class="status-text" data-testid="status-text" data-state="ready">Ready</span>
+        <span class="status-meta">Markdown · UTF-8</span>
+      </footer>
+    </div>
+
+    <script type="module" src="./renderer.mjs"></script>
+  </body>
+</html>
